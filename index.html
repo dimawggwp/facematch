@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FaceMatch - University Face-Off</title>
+    <!-- Подключаем Tailwind CSS для красивого дизайна -->
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <!-- Подключаем библиотеку для анимации конфетти -->
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.5.1/dist/confetti.browser.min.js"></script>
+</head>
+<body class="bg-neutral-950 text-white min-h-screen flex flex-col items-center justify-center p-4">
+
+    <div class="max-w-md w-full bg-neutral-900 border border-red-900/40 rounded-2xl p-6 shadow-2xl shadow-red-950/30 text-center">
+        <h1 class="text-3xl font-black tracking-wider text-red-500 mb-2">FACEMATCH</h1>
+        <p class="text-neutral-400 text-sm mb-6">Университетский батл пропорций лица</p>
+
+        <!-- Шаг 1: Выбор ID и фото -->
+        <div id="setup-screen" class="space-y-4">
+            <input type="text" id="user-id" placeholder="Твой ник или UUID игрока" class="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-red-600">
+            
+            <label class="block w-full border-2 border-dashed border-neutral-800 hover:border-red-600/50 rounded-xl p-6 cursor-pointer transition">
+                <span id="file-label" class="text-sm text-neutral-400">Загрузить свое фото</span>
+                <input type="file" id="photo-input" accept="image/*" class="hidden">
+            </label>
+
+            <button onclick="startBattle()" class="w-full bg-red-600 hover:bg-red-500 font-bold py-3 rounded-xl transition shadow-lg shadow-red-600/20">
+                НАЙТИ СОПЕРНИКА
+            </button>
+        </div>
+
+        <!-- Шаг 2: Экран ожидания -->
+        <div id="waiting-screen" class="hidden py-8">
+            <div class="inline-block w-8 h-8 border-4 border-red-600 border-t-transparent rounded-full animate-spin mb-4"></div>
+            <p id="status-text" class="text-neutral-300 font-medium">Ищем достойного соперника...</p>
+        </div>
+
+        <!-- Шаг 3: Экран результатов -->
+        <div id="result-screen" class="hidden space-y-4">
+            <h2 id="match-result-title" class="text-4xl font-black tracking-wide"></h2>
+            <div class="flex justify-around bg-neutral-950 p-4 rounded-xl border border-neutral-800">
+                <div>
+                    <p class="text-xs text-neutral-500">Твой балл</p>
+                    <p id="my-score" class="text-2xl font-bold text-red-500">-</p>
+                </div>
+                <div class="border-r border-neutral-800"></div>
+                <div>
+                    <p class="text-xs text-neutral-500">Балл соперника</p>
+                    <p id="opp-score" class="text-2xl font-bold text-neutral-300">-</p>
+                </div>
+            </div>
+            <button onclick="location.reload()" class="w-full bg-neutral-800 hover:bg-neutral-700 font-medium py-3 rounded-xl transition">
+                ИГРАТЬ ЕЩЕ РАЗ
+            </button>
+        </div>
+    </div>
+
+    <script>
+        let selectedFile = null;
+
+        document.getElementById('photo-input').addEventListener('change', (e) => {
+            selectedFile = e.target.files[0];
+            if (selectedFile) {
+                document.getElementById('file-label').innerText = "Фото выбрано: " + selectedFile.name;
+            }
+        });
+
+        async function startBattle() {
+            const userId = document.getElementById('user-id').value.trim();
+            if (!userId || !selectedFile) {
+                alert("Пожалуйста, введите ник и выберите фотографию!");
+                return;
+            }
+
+            // Переключаем экраны
+            document.getElementById('setup-screen').classList.add('hidden');
+            document.getElementById('waiting-screen').classList.remove('hidden');
+
+            // Открываем WebSocket соединение с локальным бэкендом
+            const ws = new WebSocket(`ws://127.0.0.1:8000/ws/battle/${userId}`);
+
+            ws.onopen = async () => {
+                // Конвертируем файл в байты и отправляем на сервер
+                const arrayBuffer = await selectedFile.arrayBuffer();
+                ws.send(arrayBuffer);
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+
+                if (data.status === "waiting") {
+                    document.getElementById('status-text').innerText = data.message;
+                } else if (data.status === "finished") {
+                    document.getElementById('waiting-screen').classList.add('hidden');
+                    document.getElementById('result-screen').classList.remove('hidden');
+
+                    document.getElementById('my-score').innerText = data.your_score;
+                    document.getElementById('opp-score').innerText = data.opp_score;
+
+                    const titleEl = document.getElementById('match-result-title');
+                    if (data.result === "WIN") {
+                        titleEl.innerText = "ПОБЕДА";
+                        titleEl.className = "text-4xl font-black tracking-wide text-green-500";
+                        // Запускаем победный салют из конфетти
+                        confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
+                    } else {
+                        titleEl.innerText = "ПОРАЖЕНИЕ";
+                        titleEl.className = "text-4xl font-black tracking-wide text-red-600";
+                    }
+                }
+            };
+
+            ws.onerror = () => {
+                alert("Ошибка соединения с сервером!");
+                location.reload();
+            };
+        }
+    </script>
+</body>
+</html>
