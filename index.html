@@ -1174,606 +1174,992 @@ const Net = USE_SB ? SupaNet() : DemoNet();
 let camStream = null;
 async function ensureCamera() {
   if (camStream && camStream.getVideoTracks()[0]?.readyState === 'live') return camStream;
-  const v = { facingMode: 'user', width: { ideal: 720 }, height: { ideal: 960 } };
-  try {
-    camStream = await navigator.mediaDevices.getUserMedia({ video: v, audio: false });
-    S.faceOk = true; 
-  } catch (e) {
-    console.warn('Camera err:', e);
-    S.faceOk = false;
-  }
+  const v = { facingMode: 'user', width: { ideal: 960 }, height: { ideal: 720 } };
+  try { camStream = await navigator.mediaDevices.getUserMedia({ video: v, audio: { echoCancellation: true, noiseSuppression: true } }); }
+  catch (e) { camStream = await navigator.mediaDevices.getUserMedia({ video: v, audio: false }); }
   updateChecks();
   return camStream;
 }
 
-function updateChecks() {
-  const c = $('#cam-checks');
-  if (c) {
-    const cam = !!camStream;
-    const net = navigator.onLine;
-    c.innerHTML = `
-      <li class="${cam ? 'ok' : 'bad'}"><i data-lucide="${cam ? 'check-circle-2' : 'x-circle'}"></i> <span>Камера ${cam ? 'готова' : 'недоступна'}</span></li>
-      <li class="${net ? 'ok' : 'bad'}"><i data-lucide="${net ? 'check-circle-2' : 'x-circle'}"></i> <span>Сеть ${net ? 'стабильна' : 'офлайн'}</span></li>
-      <li class="${S.faceOk ? 'ok' : 'bad'}"><i data-lucide="${S.faceOk ? 'check-circle-2' : 'x-circle'}"></i> <span>Лицо ${S.faceOk ? 'в кадре' : 'не найдено'}</span></li>
-    `;
-    icons();
+/* =================== face landmarks (MediaPipe) =================== */
+let landmarker = null, lmPromise = null;
+function loadLandmarker() {
+  if (lmPromise) return lmPromise;
+  S.model = 'loading'; updateChecks();
+  lmPromise = (async () => {
+    const V = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+    const vision = await import(V + '/vision_bundle.mjs');
+    const files = await vision.FilesetResolver.forVisionTasks(V + '/wasm');
+    const opts = d => ({ baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task', delegate: d }, runningMode: 'IMAGE', numFaces: 1 });
+    try { landmarker = await vision.FaceLandmarker.createFromOptions(files, opts('GPU')); }
+    catch (e) { landmarker = await vision.FaceLandmarker.createFromOptions(files, opts('CPU')); }
+    S.model = 'ok'; updateChecks();
+    return landmarker;
+  })().catch(e => { console.error(e); S.model = 'err'; updateChecks(); lmPromise = null; throw e; });
+  return lmPromise;
+}
+
+const FACE_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109, 10];
+const MIDLINE = [10, 151, 9, 8, 168, 6, 197, 195, 5, 4, 1, 2, 164, 0, 17, 18, 200, 199, 175, 152];
+const CATS = [
+  { k: 'sym', n: 'Симметрия', w: .22 },
+  { k: 'jaw', n: 'Челюсть', w: .18 },
+  { k: 'eyes', n: 'Глаза', w: .18 },
+  { k: 'thirds', n: 'Трети лица', w: .16 },
+  { k: 'phi', n: 'Золотое сечение', w: .14 },
+  { k: 'gaze', n: 'Взгляд и ракурс', w: .12 },
+];
+
+/* Метрики по мотивам attractivenesstest.com / Rate My Face: симметрия, пропорции φ, трети, челюсть, кантальный наклон, взгляд */
+function scoreFace(L, w, h) {
+  const raw = i => ({ x: L[i].x * w, y: L[i].y * h });
+  const d = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+  const le = mid(raw(33), raw(133)), re = mid(raw(263), raw(362));
+  const roll = Math.atan2(re.y - le.y, re.x - le.x);
+  const c = raw(168), cs = Math.cos(-roll), sn = Math.sin(-roll);
+  const P = i => { const p = raw(i), x = p.x - c.x, y = p.y - c.y; return { x: x * cs - y * sn + c.x, y: x * sn + y * cs + c.y }; };
+  const g = (x, ideal, sigma) => 3 + 7 * Math.exp(-0.5 * ((x - ideal) / sigma) ** 2);
+  const ang = (a, b, c2) => { const v1 = { x: a.x - b.x, y: a.y - b.y }, v2 = { x: c2.x - b.x, y: c2.y - b.y }; return Math.acos(clamp((v1.x * v2.x + v1.y * v2.y) / (Math.hypot(v1.x, v1.y) * Math.hypot(v2.x, v2.y)), -1, 1)) * 180 / Math.PI; };
+  const faceW = d(P(234), P(454));
+
+  const mx = (P(10).x + P(168).x + P(1).x + P(152).x) / 4;
+  const pairs = [[33, 263], [133, 362], [159, 386], [145, 374], [70, 300], [105, 334], [107, 336], [61, 291], [234, 454], [172, 397], [58, 288], [132, 361], [50, 280], [129, 358], [93, 323]];
+  let asym = 0;
+  for (const [a, b] of pairs) { const A = P(a), B = P(b); asym += Math.abs((mx - A.x) - (B.x - mx)) + Math.abs(A.y - B.y); }
+  asym = asym / pairs.length / faceW;
+  const sym = g(asym, 0, 0.05);
+
+  const gon = (ang(P(234), P(172), P(152)) + ang(P(454), P(397), P(152))) / 2;
+  const jaw = g(gon, 128, 14) * .6 + g(d(P(172), P(397)) / faceW, .8, .1) * .4;
+
+  const tilt = (inn, out) => { const I = P(inn), O = P(out); return Math.atan2(I.y - O.y, Math.abs(O.x - I.x)) * 180 / Math.PI; };
+  const ct = (tilt(133, 33) + tilt(362, 263)) / 2;
+  const ew = (d(P(33), P(133)) + d(P(362), P(263))) / 2, ic = d(P(133), P(362));
+  const eyes = g(ct, 6, 6) * .6 + g(ic / ew, 1, .22) * .4;
+
+  const browY = (P(105).y + P(334).y) / 2, subY = P(2).y, chinY = P(152).y, stoY = (P(13).y + P(14).y) / 2;
+  const thirds = g((subY - browY) / (chinY - subY), 1, .18) * .6 + g((stoY - subY) / (chinY - stoY), .5, .15) * .4;
+
+  const faceLen = (chinY - browY) * 1.5;
+  const phi = g(faceLen / faceW, 1.36, .16) * .5 + g(d(P(61), P(291)) / d(P(64), P(294)), 1.55, .25) * .5;
+
+  const yaw = (P(1).x - (P(234).x + P(454).x) / 2) / faceW;
+  let gz = .5;
+  if (L.length > 477) {
+    const eyesDef = [[133, 33], [362, 263]];
+    const pos = irisIdx => {
+      const R = P(irisIdx);
+      const [inn, out] = eyesDef.sort((e1, e2) => d(R, mid(P(e1[0]), P(e1[1]))) - d(R, mid(P(e2[0]), P(e2[1]))))[0];
+      const I = P(inn), O = P(out); return (R.x - I.x) / (O.x - I.x);
+    };
+    gz = (pos(468) + pos(473)) / 2;
   }
-  const slot = $('#my-cam-slot');
-  if (slot) {
-    if (camStream) slot.classList.add('on'); else slot.classList.remove('on');
-    if (S.faceOk) slot.classList.add('face-ok'); else slot.classList.remove('face-ok');
-  }
+  const gaze = g(Math.abs(yaw), 0, .06) * .6 + g(Math.abs(gz - .5), 0, .12) * .4;
+
+  const cats = { sym, jaw, eyes, thirds, phi, gaze };
+  for (const k in cats) cats[k] = +clamp(cats[k], 1, 10).toFixed(1);
+  const score = +CATS.reduce((s, c) => s + cats[c.k] * c.w, 0).toFixed(2);
+  return { score, cats };
 }
 
-/* =================== logic & rendering =================== */
-function Header() {
-  if (!S.user) return '';
-  const me = S.profile;
-  const t = tierOf(me?.elo || 1000);
-  return `
-    <div class="top">
-      <div class="brand"><div class="brand-mark"></div> MOGGED<div class="brand-sub">Арена</div></div>
-      <div class="nav">
-        <a class="${S.view === 'arena' ? 'on' : ''}" onclick="nav('arena')"><i data-lucide="crosshair" class="ni"></i> Арена <span class="kbd">1</span></a>
-        <a class="${S.view === 'board' ? 'on' : ''}" onclick="nav('board')"><i data-lucide="bar-chart-2" class="ni"></i> Рейтинг <span class="kbd">2</span></a>
-        <a class="${S.view === 'prof' ? 'on' : ''}" onclick="nav('prof')"><i data-lucide="user" class="ni"></i> Профиль <span class="kbd">3</span></a>
+function analyze(c) {
+  const zero = { score: 0, cats: Object.fromEntries(CATS.map(x => [x.k, 0])), noFace: true, lm: null };
+  if (!c || !landmarker) return zero;
+  let r; try { r = landmarker.detect(c); } catch (e) { console.error(e); return zero; }
+  const L = r?.faceLandmarks?.[0];
+  if (!L) return zero;
+  return { ...scoreFace(L, c.width, c.height), noFace: false, lm: L.map(p => [+p.x.toFixed(4), +p.y.toFixed(4)]) };
+}
+function grab(video, maxW = 960) {
+  if (!video || !video.videoWidth) return null;
+  const k = Math.min(1, maxW / video.videoWidth);
+  const c = document.createElement('canvas');
+  c.width = Math.round(video.videoWidth * k); c.height = Math.round(video.videoHeight * k);
+  c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
+  return c;
+}
+function toJpeg(c, maxW = 420) {
+  if (!c) return null;
+  const k = Math.min(1, maxW / c.width), o = document.createElement('canvas');
+  o.width = Math.round(c.width * k); o.height = Math.round(c.height * k);
+  o.getContext('2d').drawImage(c, 0, 0, o.width, o.height);
+  return o.toDataURL('image/jpeg', .72);
+}
+
+function drawGuides(x, P, W, p) {
+  x.save(); x.lineWidth = Math.max(1, W / 280);
+  const poly = (idx, frac) => { const n = Math.max(2, Math.floor(idx.length * frac)); x.beginPath(); idx.slice(0, n).forEach((k, i) => { const [a, b] = P[k]; i ? x.lineTo(a, b) : x.moveTo(a, b); }); x.stroke(); };
+  x.strokeStyle = 'rgba(240,86,80,.9)'; poly(FACE_OVAL, p);
+  x.setLineDash([W / 80, W / 120]); x.strokeStyle = 'rgba(247,236,233,.65)'; poly(MIDLINE, p);
+  const xs = FACE_OVAL.map(k => P[k][0]), L0 = Math.min(...xs) - W * .04, R0 = Math.max(...xs) + W * .04;
+  [(P[105][1] + P[334][1]) / 2, P[2][1], P[152][1]].forEach(y => { x.beginPath(); x.moveTo(L0, y); x.lineTo(L0 + (R0 - L0) * p, y); x.stroke(); });
+  x.setLineDash([]); x.strokeStyle = 'rgba(240,86,80,.95)';
+  [[133, 33], [362, 263], [61, 291], [172, 152], [397, 152]].forEach(([a, b]) => { x.beginPath(); x.moveTo(P[a][0], P[a][1]); x.lineTo(P[a][0] + (P[b][0] - P[a][0]) * p, P[a][1] + (P[b][1] - P[a][1]) * p); x.stroke(); });
+  x.fillStyle = 'rgba(240,86,80,1)';
+  [33, 133, 362, 263, 1, 2, 152, 172, 397, 61, 291, 10].forEach(k => { x.beginPath(); x.arc(P[k][0], P[k][1], Math.max(2, W / 140) * p, 0, 7); x.fill(); });
+  x.restore();
+}
+function drawShot(cv, src, lm, onDone) {
+  if (!cv || !src) { onDone?.(); return; }
+  const img = new Image();
+  img.onload = () => {
+    cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+    const x = cv.getContext('2d'), W = cv.width, H = cv.height;
+    const pts = lm ? lm.map(([a, b]) => [a * W, b * H]) : [];
+    const t0 = performance.now(), D = 1800, r = Math.max(1.4, W / 300);
+    const f = now => {
+      const t = Math.min(1, (now - t0) / D), e = 1 - Math.pow(1 - t, 3), sy = e * H * 1.05;
+      x.drawImage(img, 0, 0, W, H);
+      x.fillStyle = 'rgba(22,14,14,.3)'; x.fillRect(0, 0, W, H);
+      x.fillStyle = 'rgba(247,236,233,.85)';
+      for (let i = 0; i < pts.length; i += 2) { const [px, py] = pts[i]; if (py < sy) x.fillRect(px - r / 2, py - r / 2, r, r); }
+      if (t < 1) {
+        const gr = x.createLinearGradient(0, sy - H * .12, 0, sy);
+        gr.addColorStop(0, 'rgba(226,64,63,0)'); gr.addColorStop(1, 'rgba(226,64,63,.38)');
+        x.fillStyle = gr; x.fillRect(0, sy - H * .12, W, H * .12);
+        x.fillStyle = 'rgba(255,110,100,.95)'; x.fillRect(0, sy - 1, W, 2);
+      }
+      if (pts.length && t > .5) drawGuides(x, pts, W, Math.min(1, (t - .5) / .5));
+      if (t < 1) requestAnimationFrame(f); else onDone?.();
+    };
+    requestAnimationFrame(f);
+  };
+  img.onerror = () => onDone?.();
+  img.src = src;
+}
+
+/* =================== auth =================== */
+function renderAuth(mode = 'login') {
+  document.body.classList.remove('nav-locked');
+  $('#app').innerHTML = `
+  <div class="auth">
+    <section class="auth-poster">
+      <div class="poster-grid"></div>
+      <div class="brand"><span class="brand-mark"></span>MOGGED<span class="brand-sub">Арена</span></div>
+      <h2 class="poster-title"><span>Лицом</span><span class="outline">к лицу</span><span>за ELO</span></h2>
+      <div class="poster-rules">
+        <div><b>${CONFIG.BATTLE_SECONDS} с</b><span>таймер боя</span></div>
+        <div><b>±${CONFIG.ELO_RANGE}</b><span>разброс ELO</span></div>
+        <div><b>6</b><span>метрик лица</span></div>
       </div>
-      <div class="top-r">
-        <div class="me-chip" onclick="nav('prof')">
-          <div>
-            <div class="elo" id="top-elo">${me?.elo || 1000}</div>
-            <div class="tier">${t.name}</div>
-          </div>
-          ${ava(me)}
+    </section>
+    <section class="auth-form-wrap">
+      <form class="auth-form" id="authForm" novalidate>
+        <div class="seg auth-tabs" role="tablist">
+          <button type="button" data-mode="login" aria-pressed="${mode === 'login'}">Вход</button>
+          <button type="button" data-mode="reg" aria-pressed="${mode === 'reg'}">Регистрация</button>
         </div>
-      </div>
+        <div>
+          <h1>${mode === 'login' ? 'С возвращением' : 'Новый боец'}</h1>
+          <p class="lead">${mode === 'login' ? 'Арена ждёт. Твоё ELO тоже.' : 'Профиль и факультет. Остальное решит разметка лица.'}</p>
+        </div>
+        <div class="reg-only" ${mode === 'reg' ? '' : 'hidden'}>
+          <div class="row2">
+            <div class="field"><label for="fName">Имя</label><input class="input" id="fName" maxlength="32" autocomplete="name" placeholder="Айдана"></div>
+            <div class="field"><label for="fUser">Юзернейм</label><input class="input" id="fUser" maxlength="20" autocomplete="username" placeholder="aidana_k"></div>
+          </div>
+        </div>
+        <div class="reg-only field" ${mode === 'reg' ? '' : 'hidden'}>
+          <label for="fFac">Факультет</label>
+          <select class="select" id="fFac"><option value="">Выбери факультет</option>${FACULTIES.map(f => `<option value="${f.id}">${f.name}</option>`).join('')}</select>
+        </div>
+        <div class="field"><label for="fEmail">Почта</label><input class="input" id="fEmail" type="email" autocomplete="email" placeholder="you@narxoz.kz"></div>
+        <div class="field"><label for="fPass">Пароль</label><input class="input" id="fPass" type="password" autocomplete="${mode === 'login' ? 'current-password' : 'new-password'}" placeholder="минимум 6 символов"></div>
+        <p class="err" id="authErr"></p>
+        <button class="btn primary" id="authBtn">${mode === 'login' ? 'Войти' : 'Создать профиль'}<i data-lucide="arrow-right"></i></button>
+        ${USE_SB ? '' : '<p class="auth-note">Демо-режим: данные в этом браузере. Для боя открой вторую вкладку и зарегистрируй второго игрока. Для продакшена впиши ключи Supabase в CONFIG.</p>'}
+      </form>
+    </section>
+  </div>`;
+  icons();
+  $$('[data-mode]').forEach(b => b.onclick = () => renderAuth(b.dataset.mode));
+  $('#authForm').onsubmit = async e => {
+    e.preventDefault();
+    const err = $('#authErr'), btn = $('#authBtn'); err.textContent = '';
+    $$('.input,.select').forEach(i => i.removeAttribute('aria-invalid'));
+    const email = $('#fEmail').value.trim(), pass = $('#fPass').value;
+    const bad = (id, msg) => { $(id).setAttribute('aria-invalid', 'true'); err.textContent = msg; $(id).focus(); };
+    if (mode === 'reg') {
+      const name = $('#fName').value.trim(), user = $('#fUser').value.trim(), f = $('#fFac').value;
+      if (name.length < 2) return bad('#fName', 'Имя: от 2 символов');
+      if (!/^[a-zA-Z0-9_.]{3,20}$/.test(user)) return bad('#fUser', 'Юзернейм: 3-20 символов, латиница, цифры, _ и .');
+      if (!f) return bad('#fFac', 'Выбери факультет');
+      if (!/^\S+@\S+\.\S+$/.test(email)) return bad('#fEmail', 'Проверь почту');
+      if (pass.length < 6) return bad('#fPass', 'Пароль: минимум 6 символов');
+      btn.classList.add('is-loading');
+      try {
+        const r = await Net.signUp(email, pass, { display_name: name, username: user, faculty: f });
+        if (r.confirm) { btn.classList.remove('is-loading'); err.style.color = 'var(--ok)'; err.textContent = 'Проверь почту и подтверди аккаунт, потом войди.'; return; }
+        boot();
+      } catch (ex) { btn.classList.remove('is-loading'); err.textContent = ex.message; }
+    } else {
+      if (!/^\S+@\S+\.\S+$/.test(email)) return bad('#fEmail', 'Проверь почту');
+      if (!pass) return bad('#fPass', 'Введи пароль');
+      btn.classList.add('is-loading');
+      try { await Net.signIn(email, pass); boot(); }
+      catch (ex) { btn.classList.remove('is-loading'); err.textContent = ex.message; }
+    }
+  };
+}
+
+/* =================== shell =================== */
+function renderShell() {
+  $('#app').innerHTML = `
+  <header class="top">
+    <div class="brand"><span class="brand-mark"></span>MOGGED<span class="brand-sub">Арена</span></div>
+    <nav class="nav" aria-label="Разделы">
+      <a data-go="arena"><i data-lucide="swords" class="ni"></i><span>Арена</span><span class="kbd">1</span></a>
+      <a data-go="board"><i data-lucide="trophy" class="ni"></i><span>Рейтинг</span><span class="kbd">2</span></a>
+      <a data-go="history"><i data-lucide="history" class="ni"></i><span>История</span><span class="kbd">3</span></a>
+      <a data-go="profile"><i data-lucide="user-round" class="ni"></i><span>Профиль</span><span class="kbd">4</span></a>
+    </nav>
+    <div class="top-r">
+      <button class="icon-btn" id="muteBtn" aria-label="Звук"></button>
+      <button class="me-chip" id="meChip" data-go="profile"></button>
     </div>
-  `;
+  </header>
+  <main id="main"></main>
+  ${USE_SB ? '' : '<div class="demo-flag">Демо · данные в браузере</div>'}`;
+  $$('[data-go]').forEach(a => a.addEventListener('click', () => { SFX.click(); go(a.dataset.go); }));
+  $('#muteBtn').onclick = () => { S.muted = !S.muted; localStorage.setItem('mog_muted', S.muted ? '1' : '0'); renderMute(); if (!S.muted) SFX.click(); };
+  renderMute(); updateMe();
 }
-
-function AuthView() {
-  return `
-    <div class="auth view">
-      <div class="auth-poster">
-        <div class="poster-grid"></div>
-        <div class="brand"><div class="brand-mark"></div> MOGGED</div>
-        <div class="poster-title"><span>Face</span><span>Your</span><span class="outline">Rivals</span></div>
-        <div class="poster-rules">
-          <div><b>1</b><span>Включи камеру</span></div>
-          <div><b>2</b><span>Найди оппонента</span></div>
-          <div><b>3</b><span>Докажи превосходство</span></div>
-        </div>
-      </div>
-      <div class="auth-form-wrap">
-        <form class="auth-form" id="auth-form">
-          <h1>Вход в Арену</h1>
-          <p class="lead">Войдите или создайте аккаунт</p>
-          <div class="auth-tabs seg" id="auth-mode">
-            <button type="button" aria-pressed="true" data-mode="login">Вход</button>
-            <button type="button" aria-pressed="false" data-mode="reg">Регистрация</button>
-          </div>
-          <div class="field reg-only" hidden>
-            <label>Юзернейм</label>
-            <input type="text" class="input" id="auth-usr" placeholder="nagibator2000" pattern="^[a-zA-Z0-9_.]{3,20}$">
-          </div>
-          <div class="field reg-only" hidden>
-            <label>Отображаемое имя</label>
-            <input type="text" class="input" id="auth-name" placeholder="Иван И.">
-          </div>
-          <div class="field reg-only" hidden>
-            <label>Факультет</label>
-            <select class="select" id="auth-fac">
-              ${FACULTIES.map(f => `<option value="${f.id}">${f.name}</option>`).join('')}
-            </select>
-          </div>
-          <div class="field">
-            <label>Email</label>
-            <input type="email" class="input" id="auth-email" required placeholder="user@narxoz.kz">
-          </div>
-          <div class="field">
-            <label>Пароль</label>
-            <input type="password" class="input" id="auth-pass" required placeholder="••••••••">
-          </div>
-          <div class="err" id="auth-err"></div>
-          <button type="submit" class="btn primary">Продолжить <i data-lucide="arrow-right"></i></button>
-        </form>
-      </div>
-    </div>`;
-}
-
-function ArenaView() {
-  const me = S.profile;
-  const t = tierOf(me?.elo || 1000);
-  return `
-    <div class="arena view">
-      <div class="you">
-        <div class="cam-slot" id="my-cam-slot">
-          <video id="my-cam" autoplay playsinline muted></video>
-          <div class="empty"><i data-lucide="camera-off"></i> <b>Камера выключена</b><p>Включи камеру для игры</p></div>
-          <div class="cam-state"><i data-lucide="focus"></i> Авто-фокус</div>
-          <div class="viewfinder"></div>
-        </div>
-        <div class="you-name">
-          <h3>${esc(me?.display_name)}</h3>
-          <span class="mono muted">#${esc(me?.username)}</span>
-        </div>
-        <div class="you-meta">${fac(me?.faculty).name}</div>
-        <ul class="checks" id="cam-checks"></ul>
-        <div class="tierbar">
-          <div class="lbl"><span>${t.name}</span> <b>${t.next ? t.next.min - me.elo + ' до ' + t.next.n : 'Максимум'}</b></div>
-          <div class="track"><i style="transform:scaleX(${t.pct})"></i></div>
-        </div>
-      </div>
-      <div class="arena-center">
-        <div class="arena-head">
-          <div class="h-page">Арена</div>
-          <div class="controls">
-            <div class="seg">
-              <button onclick="setScope('all')" aria-pressed="${S.scope === 'all'}">Все факультеты</button>
-              <button onclick="setScope('faculty')" aria-pressed="${S.scope === 'faculty'}">Свой</button>
-            </div>
-            <div class="seg">
-              <button onclick="setRanked(true)" aria-pressed="${S.ranked}">Рейтинг</button>
-              <button onclick="setRanked(false)" aria-pressed="${!S.ranked}">Обычный</button>
-            </div>
-          </div>
-        </div>
-        <button class="launch ${S.search ? 'is-searching' : ''} ${S.model === 'found' ? 'is-found' : ''}" id="btn-launch" onclick="toggleSearch()">
-          <div class="launch-lines"></div>
-          ${S.model === 'found' ? `
-            <div class="launch-eyebrow">Оппонент найден</div>
-            <div class="found-wrap">
-              ${ava(S.battle?.opp, 'xl')}
-              <div>
-                <div class="found-name reel"><span>${esc(S.battle?.opp?.display_name)}</span></div>
-                <div class="found-meta">${fac(S.battle?.opp?.faculty).name} • ELO ${S.battle?.opp?.elo}</div>
-              </div>
-            </div>
-            <div class="found-bar"><i></i></div>
-          ` : S.search ? `
-            <div class="scan-bars"></div>
-            <div class="radar"></div>
-            <div class="launch-eyebrow">Поиск соперника...</div>
-            <div class="search-meta">
-              <div class="big">${S.online}</div>
-              <small><b>Игроков онлайн</b><br>в вашем диапазоне ELO</small>
-            </div>
-            <div class="launch-actions">
-              <span>Ожидание ответа от сервера...</span>
-              <div class="btn sm ghost" onclick="toggleSearch(); event.stopPropagation()">Отмена</div>
-            </div>
-          ` : `
-            <i data-lucide="arrow-up-right" class="launch-arrow"></i>
-            <div>
-              <div class="launch-eyebrow">Начать</div>
-              <div class="launch-title"><span>MOG</span><br><span>BATTLE</span></div>
-            </div>
-            <div class="launch-foot">
-              <span>Поиск по ELO: <b>±${CONFIG.ELO_RANGE}</b></span>
-              <span>Нажми чтобы начать</span>
-            </div>
-          `}
-        </button>
-        <div class="stats-strip">
-          <div><b><i data-lucide="swords"></i> ${me?.wins + me?.losses}</b><small>Всего боёв</small></div>
-          <div><b><i data-lucide="trophy" style="color:var(--ok)"></i> ${me?.wins}</b><small>Побед</small></div>
-          <div><b><i data-lucide="flame" class="flame"></i> ${me?.streak}</b><small>Стрик</small></div>
-          <div><b><i data-lucide="trending-up"></i> ${me?.peak_elo}</b><small>Пик ELO</small></div>
-        </div>
-      </div>
-      <div class="feed">
-        <div class="feed-head"><div class="live">LIVE FEED</div></div>
-        <div class="feed-online"><b>${S.online}</b><span>игроков<br>онлайн</span></div>
-        <ol id="feed-list"></ol>
-      </div>
-    </div>
-  `;
-}
-
-function BattleView() {
-  const me = S.profile, opp = S.battle.opp;
-  return `
-    <div class="battle view">
-      <div class="battle-top">
-        <div class="battle-h h-page">Дуэль</div>
-        <div class="room-status" id="room-status">Подключение <span class="dots"><i></i><i></i><i></i></span></div>
-      </div>
-      <div class="stage">
-        <div class="tile me connected joined" id="tile-me">
-          <video id="battle-me" autoplay playsinline muted></video>
-          <figcaption>
-            ${ava(me)}
-            <div class="who"><b>${esc(me.display_name)}</b><small>${fac(me.faculty).short}</small></div>
-            <div class="elo-tag">${me.elo}</div>
-          </figcaption>
-          <div class="flash"></div>
-          <div class="scan"></div>
-        </div>
-        <div class="mid">
-          <div class="ring idle" id="battle-ring">
-            <svg viewBox="0 0 100 100"><circle class="bg" cx="50" cy="50" r="47.5"/><circle class="fg" cx="50" cy="50" r="47.5"/></svg>
-            <b id="battle-time">VS</b>
-          </div>
-          <div class="mid-label" id="battle-lbl">Ожидание оппонента...</div>
-        </div>
-        <div class="tile opp" id="tile-opp">
-          <video id="battle-opp" autoplay playsinline></video>
-          <div class="tile-wait">
-            ${ava(opp, 'lg')}
-            <b>${esc(opp.display_name)}</b>
-            <span>Установка P2P соединения...</span>
-          </div>
-          <figcaption>
-            ${ava(opp)}
-            <div class="who"><b>${esc(opp.display_name)}</b><small>${fac(opp.faculty).short}</small></div>
-            <div class="elo-tag">${opp.elo}</div>
-          </figcaption>
-          <div class="flash"></div>
-          <div class="scan"></div>
-        </div>
-      </div>
-      <div class="battle-foot">
-        <div class="tip"><i data-lucide="info"></i> Смотри прямо в камеру, чтобы максимизировать симметрию.</div>
-        <button class="btn sm ghost" onclick="cancelBattle()">Сдаться</button>
-      </div>
-    </div>
-  `;
-}
-
-function ResultView() {
-  const B = S.battle, res = B.result;
-  if (!res) return '';
-  const meIsA = res.player_a === S.profile.id;
-  const me = meIsA ? res.a : res.b, opp = meIsA ? res.b : res.a;
-  const meScore = meIsA ? res.score_a : res.score_b;
-  const oppScore = meIsA ? res.score_b : res.score_a;
-  const meEloB = meIsA ? res.elo_a_before : res.elo_b_before;
-  const meEloA = meIsA ? res.elo_a_after : res.elo_b_after;
-  const iWin = res.winner === S.profile.id;
-  const d = meEloA - meEloB;
-  const symMe = (meScore * 0.4 + 3).toFixed(1), symOpp = (oppScore * 0.4 + 3).toFixed(1);
-  const jawMe = (meScore * 0.35 + 4).toFixed(1), jawOpp = (oppScore * 0.35 + 4).toFixed(1);
-  const canMe = (meScore * 0.25 + 5).toFixed(1), canOpp = (oppScore * 0.25 + 5).toFixed(1);
-
-  return `
-    <div class="result view">
-      <div class="verdict ${iWin ? 'win' : 'lose'}">
-        <div class="verdict-title">${iWin ? 'VICTORY' : 'DEFEAT'}</div>
-        <div class="elo-line">
-          <span class="now">${meEloA}</span>
-          <span class="d ${d >= 0 ? 'up' : 'down'}">${d > 0 ? '+' : ''}${d}</span>
-        </div>
-        ${iWin && tierOf(meEloA).idx > tierOf(meEloB).idx ? `<div class="tierup">НОВЫЙ ТИР: ${tierOf(meEloA).name}</div>` : ''}
-      </div>
-      <div class="duel">
-        <div class="side ${iWin ? 'win' : ''}">
-          <div class="shot"><canvas id="res-me"></canvas><div class="stamp ${iWin ? 'in' : ''}">${iWin ? 'MOGGED' : 'OVER'}</div></div>
-          <div class="side-head">
-            <div class="who">${ava(me)} <b>${esc(me.display_name)}</b></div>
-            <div class="score">${meScore.toFixed(2)}</div>
-          </div>
-          <ul class="cats">
-            <li class="${symMe >= symOpp ? 'better' : ''}">Симметрия <div class="bar"><i style="transform:scaleX(${symMe/10})"></i></div> <b>${symMe}</b></li>
-            <li class="${jawMe >= jawOpp ? 'better' : ''}">Линия челюсти <div class="bar"><i style="transform:scaleX(${jawMe/10})"></i></div> <b>${jawMe}</b></li>
-            <li class="${canMe >= canOpp ? 'better' : ''}">Кантусы <div class="bar"><i style="transform:scaleX(${canMe/10})"></i></div> <b>${canMe}</b></li>
-          </ul>
-        </div>
-        <div class="vs-col">VS</div>
-        <div class="side opp-side ${!iWin ? 'win' : ''}">
-          <div class="shot"><canvas id="res-opp"></canvas><div class="stamp ${!iWin ? 'in' : ''}">${!iWin ? 'MOGGED' : 'OVER'}</div></div>
-          <div class="side-head">
-            <div class="who">${ava(opp)} <b>${esc(opp.display_name)}</b></div>
-            <div class="score">${oppScore.toFixed(2)}</div>
-          </div>
-          <ul class="cats">
-            <li class="${symOpp >= symMe ? 'better' : ''}">Симметрия <div class="bar"><i style="transform:scaleX(${symOpp/10})"></i></div> <b>${symOpp}</b></li>
-            <li class="${jawOpp >= jawMe ? 'better' : ''}">Линия челюсти <div class="bar"><i style="transform:scaleX(${jawOpp/10})"></i></div> <b>${jawOpp}</b></li>
-            <li class="${canOpp >= canMe ? 'better' : ''}">Кантусы <div class="bar"><i style="transform:scaleX(${canOpp/10})"></i></div> <b>${canOpp}</b></li>
-          </ul>
-        </div>
-      </div>
-      <div class="result-actions">
-        <button class="btn primary" onclick="nav('arena')">Вернуться в Арену <i data-lucide="arrow-right"></i></button>
-      </div>
-    </div>
-  `;
-}
-
-function BoardView() {
-  setTimeout(async () => {
-    try {
-      const data = await Net.leaderboard('all');
-      const lb = $('#lb-rows');
-      if (lb) lb.innerHTML = data.map((p, i) => `
-        <li class="row ${i < 3 ? 'top' : ''}" style="--i:${i}">
-          <div class="rk">#${i + 1}</div>
-          ${ava(p)}
-          <div class="nm"><b>${esc(p.display_name)}</b><small>@${esc(p.username)}</small></div>
-          <div class="fc">${fac(p.faculty).short}</div>
-          <div class="wl">${p.wins}W ${p.losses}L</div>
-          <div class="el">${p.elo}</div>
-        </li>
-      `).join('');
-    } catch(e){}
-  }, 50);
-
-  return `
-    <div class="board view">
-      <div class="board-head">
-        <div class="h-page">Рейтинг</div>
-      </div>
-      <div class="row-head"><span>Место</span><span>Игрок</span><span></span><span>Факультет</span><span>Статистика</span><span>ELO</span></div>
-      <ul class="rows" id="lb-rows"><div class="skel"></div><div class="skel"></div><div class="skel"></div></ul>
-    </div>
-  `;
-}
-
-function ProfView() {
+function renderMute() { const b = $('#muteBtn'); if (!b) return; b.innerHTML = `<i data-lucide="${S.muted ? 'volume-x' : 'volume-2'}"></i>`; icons(); }
+function updateMe(bump = false) {
+  const c = $('#meChip'); if (!c) return;
   const p = S.profile;
-  return `
-    <div class="prof view">
-      <div class="prof-left">
-        <div class="ava-edit" onclick="toast('Загрузка аватара доступна только в полной версии', 'err')">
-          ${p.avatar_url ? `<img src="${esc(p.avatar_url)}">` : `<div class="ini">${esc(initials(p.display_name))}</div>`}
-          <div class="over"><i data-lucide="camera"></i> Изменить</div>
-        </div>
-        <div class="prof-id">
-          <h2>${esc(p.display_name)}</h2>
-          <p>@${esc(p.username)}</p>
-          <div class="tier-badge">${tierOf(p.elo).name}</div>
-        </div>
-        <div class="statlist">
-          <dl><dt>ELO Рейтинг</dt><dd>${p.elo}</dd></dl>
-          <dl><dt>Пик ELO</dt><dd>${p.peak_elo}</dd></dl>
-          <dl><dt>Победы</dt><dd>${p.wins}</dd></dl>
-          <dl><dt>Поражения</dt><dd>${p.losses}</dd></dl>
-        </div>
-        <button class="btn ghost" onclick="logout()"><i data-lucide="log-out"></i> Выйти</button>
-      </div>
-      <div class="prof-form">
-         <h3>Настройки профиля</h3>
-         <p class="muted">В данной версии редактирование данных отключено.</p>
-      </div>
-    </div>
-  `;
+  if (!p) { c.innerHTML = `<span class="tier">Новый профиль</span>${ava(null)}`; return; }
+  c.innerHTML = `<span class="elo${bump ? ' bump' : ''}">${p.elo}</span><span class="tier">${tierOf(p.elo).name}</span>${ava(p)}`;
+}
+function lockNav(on) { document.body.classList.toggle('nav-locked', on); }
+function setNavOn(v) { $$('.nav a').forEach(a => a.classList.toggle('on', a.dataset.go === v)); }
+
+function go(v) {
+  if (S.battle && !S.battle.finished && v !== 'battle') { toast('Сначала выйди из комнаты'); return; }
+  if (!S.profile && v !== 'profile') return;
+  if (S.search && v !== 'arena') cancelSearch();
+  if (S.lastRoom && v !== 'result') { const r = S.lastRoom; S.lastRoom = null; setTimeout(() => r.leave(), 100); }
+  S.view = v;
+  setNavOn(v === 'battle' ? 'arena' : v);
+  ({ arena: viewArena, board: viewBoard, history: viewHistory, profile: viewProfile })[v]?.();
+  icons();
+  scrollTo({ top: 0 });
 }
 
-function render() {
-  const app = $('#app');
-  app.innerHTML = Header() + '<main>' + (
-    S.view === 'auth' ? AuthView() :
-    S.view === 'arena' ? ArenaView() :
-    S.view === 'battle' ? BattleView() :
-    S.view === 'result' ? ResultView() :
-    S.view === 'board' ? BoardView() :
-    S.view === 'prof' ? ProfView() : ''
-  ) + '</main>';
+/* =================== arena =================== */
+function viewArena() {
+  const p = S.profile, t = tierOf(p.elo), total = p.wins + p.losses;
+  $('#main').innerHTML = `
+  <div class="arena view">
+    <aside class="you">
+      <div class="cam-slot" id="camSlot">
+        <video id="camPrev" autoplay muted playsinline></video>
+        <canvas id="camFx"></canvas>
+        <span class="viewfinder"></span>
+        <button class="empty" id="camOn" type="button"><i data-lucide="camera"></i><b>Включить камеру</b><span>Фото не нужно: бой идёт вживую по видео</span></button>
+        <span class="cam-state" id="camState">Ищем лицо</span>
+      </div>
+      <div class="you-name"><h3>${esc(p.display_name)}</h3><span class="mono">${p.elo}</span></div>
+      <p class="you-meta">@${esc(p.username)} · ${fac(p.faculty).name}</p>
+      ${tagsHTML(p.tags)}
+      <div class="tierbar">
+        <div class="lbl"><b>${t.name}</b><span>${t.next ? `до «${t.next.n}» ${t.next.min - p.elo}` : 'вершина'}</span></div>
+        <div class="track"><i id="tierFill"></i></div>
+      </div>
+      <ul class="checks" id="checks"></ul>
+    </aside>
+
+    <section class="arena-center">
+      <div class="arena-head">
+        <div><p class="eyebrow">Матчмейкинг</p><h1 class="h-page">Найти соперника</h1></div>
+        <div class="controls">
+          <div class="seg" id="scopeSeg">
+            <button data-scope="all" aria-pressed="${S.scope === 'all'}">Все факультеты</button>
+            <button data-scope="faculty" aria-pressed="${S.scope === 'faculty'}">Мой факультет</button>
+          </div>
+          <div class="seg" id="rankSeg">
+            <button data-ranked="1" aria-pressed="${S.ranked}">Рейтинг</button>
+            <button data-ranked="0" aria-pressed="${!S.ranked}">Тренировка</button>
+          </div>
+        </div>
+      </div>
+      <div id="launchWrap"></div>
+      <div class="stats-strip">
+        <div><b>${p.wins}<span class="muted">/</span>${p.losses}</b><small>победы / поражения</small></div>
+        <div><b>${total ? Math.round(p.wins / total * 100) : 0}%</b><small>винрейт</small></div>
+        <div><b>${p.streak}${p.streak >= 2 ? '<i data-lucide="flame" class="flame"></i>' : ''}</b><small>серия побед</small></div>
+        <div><b>${p.peak_elo}</b><small>пик ELO</small></div>
+      </div>
+    </section>
+
+    <aside class="feed">
+      <div class="feed-head"><span class="eyebrow">Лента боёв</span><span class="live">live</span></div>
+      <div class="feed-online"><b id="onlineN">${S.online}</b><span>онлайн<br>сейчас</span></div>
+      <ol id="feedList"></ol>
+    </aside>
+  </div>`;
+  requestAnimationFrame(() => { const f = $('#tierFill'); if (f) f.style.transform = `scaleX(${t.pct})`; });
+  $$('[data-scope]').forEach(b => b.onclick = () => { if (S.search) return; S.scope = b.dataset.scope; localStorage.setItem('mog_scope', S.scope); $$('[data-scope]').forEach(x => x.setAttribute('aria-pressed', x === b)); SFX.click(); renderLaunch(); });
+  $$('[data-ranked]').forEach(b => b.onclick = () => { if (S.search) return; S.ranked = b.dataset.ranked === '1'; localStorage.setItem('mog_ranked', S.ranked ? '1' : '0'); $$('[data-ranked]').forEach(x => x.setAttribute('aria-pressed', x === b)); SFX.click(); renderLaunch(); });
+  $('#camOn').onclick = async () => { try { await ensureCamera(); attachPreview(); } catch (e) { toast('Разреши доступ к камере в настройках браузера', 'hot', 'camera-off'); } };
+  renderLaunch(); renderFeed(); updateChecks();
+  if (camStream) attachPreview();
+  else navigator.permissions?.query({ name: 'camera' }).then(r => { if (r.state === 'granted') ensureCamera().then(attachPreview).catch(() => {}); }).catch(() => {});
+}
+
+let previewTimer = null;
+function attachPreview() {
+  const v = $('#camPrev'); if (!v || !camStream) return;
+  v.srcObject = camStream; v.play().catch(() => {});
+  $('#camSlot').classList.add('on');
+  updateChecks(); loadLandmarker().catch(() => {});
+  clearTimeout(previewTimer);
+  const small = document.createElement('canvas');
+  const step = () => {
+    const c = $('#camFx');
+    if (S.view !== 'arena' || !c || !document.body.contains(v)) return;
+    if (landmarker && v.videoWidth) {
+      const W = 256, H = Math.round(256 * v.videoHeight / v.videoWidth);
+      small.width = W; small.height = H; small.getContext('2d').drawImage(v, 0, 0, W, H);
+      let L = null; try { L = landmarker.detect(small)?.faceLandmarks?.[0]; } catch (e) {}
+      if (c.width !== v.videoWidth) { c.width = v.videoWidth; c.height = v.videoHeight; }
+      const x = c.getContext('2d'); x.clearRect(0, 0, c.width, c.height);
+      if (L) { x.fillStyle = 'rgba(247,236,233,.75)'; for (let i = 0; i < L.length; i += 3) x.fillRect(L[i].x * c.width - 1.5, L[i].y * c.height - 1.5, 3, 3); }
+      setFace(!!L);
+    }
+    previewTimer = setTimeout(step, 420);
+  };
+  step();
+}
+function setFace(ok) {
+  $('#camSlot')?.classList.toggle('face-ok', ok);
+  const st = $('#camState'); if (st) st.textContent = ok ? 'Лицо в кадре' : 'Ищем лицо';
+  if (S.faceOk !== ok) { S.faceOk = ok; updateChecks(); }
+}
+function updateChecks() {
+  const el = $('#checks'); if (!el) return;
+  const items = [
+    [!!camStream, 'Камера', camStream ? 'включена' : 'нужна'],
+    [S.faceOk, 'Лицо в кадре', S.faceOk ? 'есть' : 'не видно'],
+    [S.model === 'ok', 'Разметка лица', { ok: 'готова', loading: 'грузится', err: 'ошибка' }[S.model] || 'ждёт'],
+    [!!(S.profile?.avatar_url && S.profile?.tags?.length), 'Аватар и теги', 'по желанию'],
+  ];
+  el.innerHTML = items.map(([ok, n, s]) => `<li class="${ok ? 'ok' : 'bad'}"><i data-lucide="${ok ? 'check' : 'circle-dashed'}"></i><span>${n}</span><small>${s}</small></li>`).join('');
   icons();
 }
 
-/* =================== app actions =================== */
-window.nav = async (v) => {
-  if (S.search) await cancelSearch();
-  if (v === 'arena') { S.battle = null; cleanupBattle(); }
-  S.view = v;
-  render();
-  if (v === 'arena') { 
-    ensureCamera().then(() => { const vid = $('#my-cam'); if (vid && camStream) vid.srcObject = camStream; });
-    loadFeed(); 
+const REEL = ['Сканируем арену', `±${CONFIG.ELO_RANGE} ELO`, 'Цифровые технологии', 'Медицина', 'Госуправление', 'Гуманитарии', 'Бизнес и маркетинг'];
+function renderLaunch() {
+  const w = $('#launchWrap'); if (!w) return;
+  const p = S.profile, lo = p.elo - CONFIG.ELO_RANGE, hi = p.elo + CONFIG.ELO_RANGE;
+  const scopeTxt = S.scope === 'faculty' ? fac(p.faculty).short : 'все факультеты';
+  if (!S.search) {
+    w.innerHTML = `
+    <button class="launch" id="launchBtn">
+      <span class="launch-lines"></span>
+      <i data-lucide="arrow-up-right" class="launch-arrow"></i>
+      <span class="launch-eyebrow">${S.ranked ? 'Рейтинговый бой' : 'Тренировка без ELO'} · ${scopeTxt}</span>
+      <span class="launch-title">В бой<br>лицом</span>
+      <span class="launch-foot"><span>Соперник строго <b>${lo}-${hi}</b> ELO</span><span class="kbd">Enter</span></span>
+    </button>`;
+    const b = $('#launchBtn');
+    b.onclick = startSearch;
+    b.onmousemove = e => { const r = b.getBoundingClientRect(); b.style.setProperty('--mx', (e.clientX - r.left) + 'px'); b.style.setProperty('--my', (e.clientY - r.top) + 'px'); };
+  } else if (S.search.state === 'searching') {
+    w.innerHTML = `
+    <div class="launch is-searching">
+      <span class="scan-bars"></span><span class="radar"></span>
+      <span class="launch-eyebrow" style="color:var(--tx3)">Поиск соперника · ${scopeTxt}</span>
+      <div class="reel" id="reel"><span>${REEL[0]}</span></div>
+      <div class="search-meta">
+        <div><span class="big mono" id="sTime">0:00</span><small>в очереди</small></div>
+        <div><b>${lo}-${hi}</b><small>окно ELO</small></div>
+        <div><b id="sOnline">${S.online}</b><small>онлайн</small></div>
+      </div>
+      <div class="launch-actions"><span class="muted" style="font-size:.85rem">Бой начнётся, только когда соперник зайдёт в комнату</span><button class="btn sm" id="cancelBtn">Отменить <span class="kbd">Esc</span></button></div>
+    </div>`;
+    $('#cancelBtn').onclick = cancelSearch;
+  } else {
+    const o = S.search.match.opp;
+    w.innerHTML = `
+    <div class="launch is-found">
+      <span class="launch-eyebrow" style="color:var(--red-hi)">Соперник найден</span>
+      <div class="found-wrap">${ava(o, 'xl')}<div><span class="launch-title found-name">${esc(o.display_name)}</span><span class="found-meta">${fac(o.faculty).name} · <b class="mono">${o.elo}</b> ELO · ${tierOf(o.elo).name}</span>${tagsHTML(o.tags, 4)}</div></div>
+      <div class="found-bar"><i></i></div>
+      <div class="launch-actions"><span class="muted" style="font-size:.85rem">Заходим в комнату</span></div>
+    </div>`;
   }
-  if (v === 'result') {
-    setTimeout(() => {
-      const m = $('#res-me'), o = $('#res-opp');
-      if (m && S.battle?.meFrame) m.getContext('2d').drawImage(S.battle.meFrame, 0, 0, m.width, m.height);
-      if (o && S.battle?.oppFrame) o.getContext('2d').drawImage(S.battle.oppFrame, 0, 0, o.width, o.height);
-    }, 100);
-  }
-};
-
-window.setScope = s => { S.scope = s; localStorage.setItem('mog_scope', s); render(); };
-window.setRanked = r => { S.ranked = r; localStorage.setItem('mog_ranked', r ? '1' : '0'); render(); };
-window.toggleSearch = toggleSearch;
-window.cancelBattle = () => { cleanupBattle(); nav('arena'); };
-window.logout = () => { Net.signOut().then(() => { S.user = null; S.profile = null; nav('auth'); }); };
-
-let searchAbort;
-async function toggleSearch() {
-  if (S.search) return cancelSearch();
-  S.search = true; render(); SFX.tick();
-  searchAbort = new AbortController();
+  icons();
+}
+function updateSearchMeta() {
+  if (!S.search) return;
+  const s = Math.floor((Date.now() - S.search.t0) / 1000), el = $('#sTime');
+  if (el) el.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  const on = $('#sOnline'); if (on) on.textContent = S.online;
+}
+async function startSearch() {
+  if (S.search || S.battle) return;
+  try { await ensureCamera(); attachPreview(); }
+  catch (e) { toast('Без камеры никак: разреши доступ в браузере', 'hot', 'camera-off'); return; }
+  loadLandmarker().catch(() => {});
+  const ac = new AbortController();
+  const me = S.search = { state: 'searching', t0: Date.now(), ac };
+  SFX.click(); renderLaunch();
+  let ri = 0;
+  const iv = setInterval(() => {
+    if (S.search !== me || me.state !== 'searching') return clearInterval(iv);
+    updateSearchMeta();
+    if ((Date.now() - me.t0) % 1400 < 500) { ri = (ri + 1) % REEL.length; const r = $('#reel'); if (r) r.innerHTML = `<span>${REEL[ri]}</span>`; }
+  }, 500);
   try {
-    const m = await Net.findMatch({ elo: S.profile.elo, faculty: S.profile.faculty, scope: S.scope, ranked: S.ranked }, searchAbort.signal);
-    if (m) {
-      S.search = false; S.model = 'found'; S.battle = m; S.battle.meBefore = S.profile.elo; S.liveStarted = false;
-      SFX.found(); render();
-      setTimeout(() => { S.model = 'idle'; nav('battle'); setTimeout(() => initWebRTC(m), 100); }, 2500);
-    }
+    const m = await Net.findMatch({ scope: S.scope, ranked: S.ranked, elo: S.profile.elo, faculty: S.profile.faculty }, ac.signal);
+    if (!m || ac.signal.aborted || S.search !== me) return;
+    me.state = 'found'; me.match = m; SFX.found(); renderLaunch();
+    await sleep(1900);
+    if (S.search !== me) return;
+    S.search = null; enterBattle(m);
   } catch (e) {
-    if (e.message !== 'abort') toast(e.message, 'err');
-    S.search = false; render();
+    console.error(e); if (S.search === me) { S.search = null; renderLaunch(); }
+    toast('Поиск упал: ' + (e.message || e), 'hot');
   }
 }
+function cancelSearch() { if (!S.search || S.search.state !== 'searching') return; S.search.ac.abort(); S.search = null; renderLaunch(); }
 
-async function cancelSearch() {
-  if (searchAbort) searchAbort.abort();
-  S.search = false; S.model = 'idle'; render();
+/* feed */
+async function loadFeed() { try { S.feed = await Net.feed(); renderFeed(); } catch (e) { console.error(e); } }
+function renderFeed() {
+  const ol = $('#feedList'); if (!ol) return;
+  if (!S.feed?.length) { ol.innerHTML = '<li class="quiet" style="border:0">Пока тихо. Сыграй первый бой, и он появится тут.</li>'; return; }
+  ol.innerHTML = S.feed.map((m, i) => {
+    const aWin = m.winner === m.player_a, W = aWin ? m.a : m.b, L = aWin ? m.b : m.a;
+    const ws = +(aWin ? m.score_a : m.score_b), ls = +(aWin ? m.score_b : m.score_a);
+    return `<li style="--i:${i}"><b>${esc(W?.display_name)}</b> замогал(а) <b>${esc(L?.display_name)}</b> <span class="v">${ws.toFixed(2)}:${ls.toFixed(2)}</span><span class="meta">${fac(W?.faculty).short} vs ${fac(L?.faculty).short} · ${timeAgo(m.judged_at)}</span></li>`;
+  }).join('');
 }
+function updateOnline() { const a = $('#onlineN'); if (a && a.textContent != S.online) { a.textContent = S.online; } const b = $('#sOnline'); if (b) b.textContent = S.online; }
 
-async function loadFeed() {
-  if (S.view !== 'arena') return;
-  try {
-    const list = await Net.feed();
-    const el = $('#feed-list');
-    if (!el) return;
-    el.innerHTML = list.map((m, i) => `
-      <li style="--i:${i}">
-        <b>${esc(m.a?.display_name)}</b> vs <b>${esc(m.b?.display_name)}</b>
-        <span class="meta">${timeAgo(m.judged_at)} • Победил ${esc((m.winner === m.player_a ? m.a : m.b)?.display_name)}</span>
-      </li>
-    `).join('') || '<div class="quiet">Боёв пока не было</div>';
-  } catch (e) {}
+/* =================== battle =================== */
+function cap(p, label) {
+  return `<figcaption>${ava(p)}<span class="who"><b>${esc(p.display_name)}</b><small>${label}</small></span><span class="elo-tag">${p.elo}</span></figcaption>`;
 }
+function viewBattle() {
+  const B = S.battle, me = S.profile, op = B.opp;
+  $('#main').innerHTML = `
+  <section class="battle view">
+    <div class="battle-top">
+      <div><p class="eyebrow">${B.ranked ? 'Рейтинговый бой' : 'Тренировка'} · комната ${esc(B.id.slice(0, 6))}</p>
+      <h1 class="h-page battle-h">${esc(me.display_name)} <span class="muted">vs</span> ${esc(op.display_name)}</h1></div>
+      <div class="room-status"><span class="dots" id="pDots"><i class="on"></i><i></i></span><span id="roomStatus">Ждём соперника · 1/2</span></div>
+    </div>
+    <div class="stage">
+      <figure class="tile me connected" id="tileMe"><video id="vMe" autoplay muted playsinline></video><span class="viewfinder"></span><span class="scan"></span><span class="flash"></span>${cap(me, 'Ты · ' + fac(me.faculty).short)}</figure>
+      <div class="mid">
+        <div class="ring idle" id="ring"><svg viewBox="0 0 120 120"><circle class="bg" cx="60" cy="60" r="54"/><circle class="fg" id="ringFg" cx="60" cy="60" r="54" stroke-dasharray="339.29" stroke-dashoffset="0" transform="rotate(-90 60 60)"/></svg><b id="tNum">1/2</b></div>
+        <p class="mid-label" id="midLabel">Бой начнётся, когда соперник зайдёт в комнату</p>
+      </div>
+      <figure class="tile opp" id="tileOpp"><video id="vOpp" autoplay playsinline></video><div class="tile-wait">${ava(op, 'xl')}<b>${esc(op.display_name)}</b><span id="oppWait">заходит в комнату…</span></div><span class="scan"></span><span class="flash"></span>${cap(op, fac(op.faculty).short)}</figure>
+    </div>
+    <div class="battle-foot">
+      <span class="tip"><i data-lucide="scan-face"></i>Лицо целиком в кадре, свет спереди, смотри в объектив</span>
+      <div class="controls"><button class="btn sm" id="micBtn"><i data-lucide="mic"></i>Микрофон</button><button class="btn ghost sm" id="leaveBtn">Выйти</button></div>
+    </div>
+  </section>`;
+}
+function renderRoomStatus(B) {
+  const st = $('#roomStatus'); if (!st) return;
+  const n = Math.min(2, B.present);
+  $$('#pDots i').forEach((d, i) => d.classList.toggle('on', i < n));
+  let txt, mid;
+  if (B.started) txt = 'Бой идёт';
+  else if (n < 2) { txt = 'Ждём соперника · 1/2'; mid = 'Бой начнётся, когда соперник зайдёт в комнату'; }
+  else if (!B.remoteOk) { txt = 'Оба здесь · соединяем видео'; mid = 'Соединяем видеочат…'; }
+  else { txt = 'Оба здесь · старт'; mid = 'Сейчас начнём'; }
+  st.textContent = txt;
+  if (!B.started) {
+    $('#tNum').textContent = n + '/2';
+    if (mid) $('#midLabel').textContent = mid;
+    const w = $('#oppWait'); if (w) w.textContent = n < 2 ? 'заходит в комнату…' : 'подключаем видео…';
+    $('#tileOpp')?.classList.toggle('joined', n >= 2);
+  }
+}
+function clearTimers(B) { B.timers.forEach(t => { clearTimeout(t); clearInterval(t); }); B.timers = []; }
 
-/* =================== webrtc & battle loop =================== */
-let pc = null, room = null, battleIv;
-async function initWebRTC(match) {
-  room = Net.room(match.id, S.profile.id);
+async function enterBattle(m) {
+  clearTimeout(previewTimer);
+  const B = S.battle = { ...m, meBefore: S.profile.elo, present: 1, remoteOk: false, oppReady: false, started: false, finished: false, timers: [], pendingIce: [], fallbackSet: false };
+  lockNav(true); S.view = 'battle'; setNavOn('arena');
+  viewBattle(); icons();
+  const vMe = $('#vMe'); vMe.srcObject = camStream; vMe.play().catch(() => {});
+  $('#leaveBtn').onclick = () => { toast('Ты вышел из комнаты'); abortBattle(B, false); };
+  $('#micBtn').onclick = () => {
+    const a = camStream?.getAudioTracks()[0]; if (!a) { toast('Микрофон недоступен'); return; }
+    a.enabled = !a.enabled;
+    $('#micBtn').innerHTML = `<i data-lucide="${a.enabled ? 'mic' : 'mic-off'}"></i>${a.enabled ? 'Микрофон' : 'Без звука'}`; icons();
+  };
+  const room = B.room = Net.room(m.id, S.user.id);
+  setupPeer(B);
+  room.onPresence(ids => onPresence(B, ids));
+  room.on('join', () => { if (B.role === 'a') makeOffer(B); else room.send('here', {}); });
+  room.on('here', () => { if (B.role === 'a') makeOffer(B); });
+  room.on('offer', d => onOffer(B, d));
+  room.on('answer', d => onAnswer(B, d));
+  room.on('ice', d => onIce(B, d));
+  room.on('ready', () => { B.oppReady = true; tryStart(B); });
+  room.on('go', () => { if (B.role === 'b') startCountdown(B); });
+  room.on('shot', d => { B.oppShot = d; maybeFinish(B); });
+  room.on('bye', () => oppLeft(B));
+  loadLandmarker().catch(() => {});
   await room.ready;
-  
-  pc = new RTCPeerConnection({ iceServers: CONFIG.ICE });
-  const stream = await ensureCamera();
-  if (stream) stream.getTracks().forEach(t => pc.addTrack(t, stream));
-  
-  const mv = $('#battle-me'); if (mv && stream) mv.srcObject = stream;
-  
-  pc.onicecandidate = e => { if (e.candidate) room.send('ice', e.candidate); };
+  if (S.battle !== B) return;
+  room.send('join', {});
+  B.timers.push(setTimeout(() => {
+    if (S.battle === B && B.present < 2 && !B.started) { toast('Соперник не зашёл в комнату. Ищем другого'); abortBattle(B, true); }
+  }, 30000));
+}
+function onPresence(B, ids) {
+  if (S.battle !== B) return;
+  const n = new Set(ids).size, had = B.present;
+  B.present = n; renderRoomStatus(B);
+  if (n >= 2 && had < 2) {
+    SFX.found();
+    B.room.send('join', {});
+    if (!B.fallbackSet) {
+      B.fallbackSet = true;
+      B.timers.push(setTimeout(() => {
+        if (S.battle === B && !B.started && B.present >= 2 && B.role === 'a') { B.room.send('go', { noVideo: true }); startCountdown(B); }
+      }, 15000));
+    }
+  }
+  if (n < 2 && had >= 2 && !B.finished && B.started) oppLeft(B);
+}
+function oppLeft(B) {
+  if (S.battle !== B || B.finished || B.oppShot) return;
+  toast('Соперник вышел из комнаты', '', 'door-open');
+  abortBattle(B, false);
+}
+function abortBattle(B, research) {
+  if (S.battle !== B) return;
+  clearTimers(B); B.finished = true;
+  try { B.room.send('bye', {}); } catch (e) {}
+  Net.cancelMatch(B.id).catch(() => {});
+  setTimeout(() => B.room.leave(), 300);
+  try { B.pc?.close(); } catch (e) {}
+  S.battle = null; lockNav(false); go('arena');
+  if (research) setTimeout(startSearch, 700);
+}
+
+/* WebRTC */
+function setupPeer(B) {
+  const pc = B.pc = new RTCPeerConnection({ iceServers: CONFIG.ICE });
+  camStream.getTracks().forEach(t => pc.addTrack(t, camStream));
+  pc.onicecandidate = e => { if (e.candidate) B.room.send('ice', e.candidate.toJSON()); };
   pc.ontrack = e => {
-    const v = $('#battle-opp');
-    if (v && v.srcObject !== e.streams[0]) {
-      v.srcObject = e.streams[0];
-      $('#tile-opp')?.classList.add('connected');
-    }
+    const v = $('#vOpp'); if (!v || v.srcObject === e.streams[0]) return;
+    v.srcObject = e.streams[0];
+    v.onplaying = () => {
+      if (B.remoteOk || S.battle !== B) return;
+      B.remoteOk = true; $('#tileOpp')?.classList.add('connected');
+      B.room.send('ready', {}); renderRoomStatus(B); tryStart(B);
+    };
+    v.play().catch(() => { v.muted = true; v.play().catch(() => {}); });
   };
-
-  let state = 'wait';
-  const setLbl = s => { const l = $('#battle-lbl'); if (l) l.innerText = s; };
-
-  room.onPresence(uids => {
-    if (uids.length >= 2 && state === 'wait') {
-      state = 'join';
-      $('#tile-opp')?.classList.add('joined');
-      setLbl('Соединение P2P...');
-      if (match.role === 'a') pc.createOffer().then(o => pc.setLocalDescription(o)).then(() => room.send('offer', pc.localDescription));
-    }
-  });
-  
-  room.on('offer', async d => { await pc.setRemoteDescription(d); const a = await pc.createAnswer(); await pc.setLocalDescription(a); room.send('answer', pc.localDescription); });
-  room.on('answer', d => pc.setRemoteDescription(d));
-  room.on('ice', d => pc.addIceCandidate(d).catch(e => {}));
-  room.on('ready', () => { if (state !== 'live') startTimer(); });
-
-  pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'connected' && state !== 'live') {
-      state = 'live'; room.send('ready'); startTimer();
-    }
-  };
-  
-  setTimeout(() => { if (state !== 'live') { state = 'live'; startTimer(); } }, 6000);
+  pc.onconnectionstatechange = () => { if (pc.connectionState === 'failed' && !B.started) toast('Видео не соединилось. Бой всё равно начнётся'); };
 }
-
-function startTimer() {
-  if (S.liveStarted) return; S.liveStarted = true;
-  let left = CONFIG.BATTLE_SECONDS;
-  const b = $('#battle-time'), r = $('#battle-ring');
-  if(!b) return;
-  $('#battle-lbl').innerText = 'Анализ лицевой симметрии...';
-  r.classList.remove('idle'); r.classList.add('hot');
-  SFX.go();
-  $('#tile-me')?.classList.add('analyzing'); $('#tile-opp')?.classList.add('analyzing');
-  
-  battleIv = setInterval(() => {
-    left--; b.innerText = left; b.classList.remove('pop'); void b.offsetWidth; b.classList.add('pop');
-    SFX.count();
-    if (left <= 0) { clearInterval(battleIv); finishBattle(); }
-  }, 1000);
-}
-
-async function finishBattle() {
-  SFX.shutter();
-  $('#tile-me')?.classList.add('shot'); $('#tile-opp')?.classList.add('shot');
-  
-  const meC = document.createElement('canvas'), oppC = document.createElement('canvas');
-  const mv = $('#battle-me'), ov = $('#battle-opp');
-  meC.width = 480; meC.height = 640; oppC.width = 480; oppC.height = 640;
-  if (mv && mv.readyState >= 2) meC.getContext('2d').drawImage(mv, 0, 0, 480, 640);
-  if (ov && ov.readyState >= 2) oppC.getContext('2d').drawImage(ov, 0, 0, 480, 640);
-  S.battle.meFrame = meC; S.battle.oppFrame = oppC;
-  
-  $('#battle-lbl').innerText = 'Отправка результатов...';
-  
-  // Фейковый подсчет для демо
-  const myScore = 5 + Math.random() * 4.9;
-  const oppScore = 5 + Math.random() * 4.9;
-  
+async function flushIce(B) { for (const c of B.pendingIce.splice(0)) { try { await B.pc.addIceCandidate(c); } catch (e) {} } }
+async function makeOffer(B) {
+  const pc = B.pc; if (!pc || pc.remoteDescription) return;
   try {
-    const res = await Net.report(S.battle, myScore, oppScore, {});
-    if (res) {
-      S.battle.result = res;
-      nav('result');
-      if (res.winner === S.profile.id) { SFX.win(); confetti(); } else SFX.lose();
-    } else {
-      toast('Ошибка загрузки результатов', 'err'); nav('arena');
-    }
-  } catch (e) {
-    toast(e.message, 'err'); nav('arena');
+    if (pc.signalingState === 'have-local-offer') { B.room.send('offer', pc.localDescription.toJSON()); return; }
+    if (B.makingOffer) return; B.makingOffer = true;
+    const o = await pc.createOffer(); await pc.setLocalDescription(o);
+    B.room.send('offer', pc.localDescription.toJSON());
+  } catch (e) { console.error(e); } finally { B.makingOffer = false; }
+}
+async function onOffer(B, d) {
+  const pc = B.pc; if (B.role !== 'b' || !pc) return;
+  try {
+    if (pc.remoteDescription) { if (pc.localDescription) B.room.send('answer', pc.localDescription.toJSON()); return; }
+    await pc.setRemoteDescription(d); await flushIce(B);
+    const a = await pc.createAnswer(); await pc.setLocalDescription(a);
+    B.room.send('answer', pc.localDescription.toJSON());
+  } catch (e) { console.error(e); }
+}
+async function onAnswer(B, d) {
+  const pc = B.pc; if (B.role !== 'a' || !pc || pc.signalingState !== 'have-local-offer') return;
+  try { await pc.setRemoteDescription(d); await flushIce(B); } catch (e) { console.error(e); }
+}
+async function onIce(B, d) {
+  const pc = B.pc; if (!pc) return;
+  if (pc.remoteDescription) { try { await pc.addIceCandidate(d); } catch (e) {} } else B.pendingIce.push(d);
+}
+function tryStart(B) {
+  if (B.role === 'a' && !B.started && B.present >= 2 && B.remoteOk && B.oppReady) { B.room.send('go', {}); startCountdown(B); }
+}
+
+async function startCountdown(B) {
+  if (B.started || S.battle !== B) return;
+  B.started = true; renderRoomStatus(B);
+  const ring = $('#ring'), num = $('#tNum'), label = $('#midLabel'), fg = $('#ringFg');
+  const pop = () => { num.classList.remove('pop'); void num.offsetWidth; num.classList.add('pop'); };
+  ring.classList.remove('idle');
+  for (const n of [3, 2, 1]) {
+    if (S.battle !== B) return;
+    num.textContent = n; pop(); label.textContent = 'Приготовься'; SFX.count();
+    await sleep(800);
   }
-  
-  cleanupBattle();
-}
-
-function cleanupBattle() {
-  clearInterval(battleIv);
-  if (pc) { pc.close(); pc = null; }
-  if (room) { room.leave(); room = null; }
-}
-
-/* =================== init =================== */
-document.addEventListener('submit', async e => {
-  e.preventDefault();
-  if (e.target.id === 'auth-form') {
-    const mode = $('#auth-mode button[aria-pressed="true"]').dataset.mode;
-    const email = $('#auth-email').value, pass = $('#auth-pass').value;
-    const btn = e.target.querySelector('button'), err = $('#auth-err');
-    err.innerText = ''; btn.classList.add('is-loading');
-    try {
-      if (mode === 'login') {
-        S.user = await Net.signIn(email, pass);
-      } else {
-        const prof = { username: $('#auth-usr').value, display_name: $('#auth-name').value, faculty: $('#auth-fac').value };
-        const r = await Net.signUp(email, pass, prof);
-        if (r.confirm) { toast('Проверьте почту для подтверждения', 'hot', 'mail'); return; }
-        S.user = r.user;
+  if (S.battle !== B) return;
+  SFX.go(); label.textContent = 'Смотри в камеру и держи лицо';
+  $('#tileMe').classList.add('hot'); $('#tileOpp').classList.add('hot');
+  const dur = CONFIG.BATTLE_SECONDS * 1000, t0 = Date.now(), C = 339.29;
+  let last = null;
+  await new Promise(res => {
+    const iv = setInterval(() => {
+      if (S.battle !== B) { clearInterval(iv); return res(); }
+      const el = Date.now() - t0, left = Math.max(0, dur - el), sec = Math.ceil(left / 1000);
+      fg.style.strokeDashoffset = (C * Math.min(1, el / dur)).toFixed(2);
+      if (sec !== last) {
+        last = sec; num.textContent = sec;
+        if (sec <= 3 && sec > 0) { ring.classList.add('hot'); pop(); SFX.tick(); label.textContent = 'Не моргай'; }
       }
-      S.profile = await Net.getProfile(S.user.id);
-      nav('arena');
-    } catch (errMsg) {
-      err.innerText = errMsg.message; SFX.click();
-    } finally { btn.classList.remove('is-loading'); }
-  }
-});
+      if (left <= 0) { clearInterval(iv); res(); }
+    }, 40);
+    B.timers.push(iv);
+  });
+  if (S.battle !== B) return;
+  capture(B);
+}
 
-document.addEventListener('click', e => {
-  if (e.target.closest('#auth-mode button')) {
-    const b = e.target.closest('button');
-    $$('#auth-mode button').forEach(x => x.setAttribute('aria-pressed', 'false'));     b.setAttribute('aria-pressed', 'true');     const reg = b.dataset.mode === 'reg';     $$
-('.reg-only').forEach(x => x.hidden = !reg);
-    $('#auth-usr').required = reg; $('#auth-name').required = reg;
+async function capture(B) {
+  const tMe = $('#tileMe'), tOpp = $('#tileOpp'), ring = $('#ring');
+  [tMe, tOpp].forEach(t => { t.classList.remove('shot', 'hot'); void t.offsetWidth; t.classList.add('shot', 'analyzing'); });
+  ring.classList.remove('hot'); ring.classList.add('idle');
+  $('#tNum').textContent = 'AI'; $('#midLabel').textContent = 'Снимок сделан. Размечаем лица…';
+  SFX.shutter();
+  const local = grab($('#vMe')), remote = B.remoteOk ? grab($('#vOpp')) : null;
+  try { await withTimeout(loadLandmarker(), 25000); } catch (e) { toast('Модель разметки не загрузилась', 'hot'); }
+  if (S.battle !== B) return;
+  const mine = analyze(local);
+  const shot = { score: mine.score, cats: mine.cats, noFace: mine.noFace, lm: mine.lm, img: toJpeg(local) };
+  B.room.send('shot', shot);
+  B.myShot = shot;
+  if (remote) { const w = analyze(remote); B.witness = { ...w, img: toJpeg(remote) }; }
+  B.timers.push(setTimeout(() => {
+    if (S.battle !== B || B.finished || B.oppShot) return;
+    if (B.witness && !B.witness.noFace) { B.oppShot = { ...B.witness, fromWitness: true }; maybeFinish(B); }
+    else { toast('Не получили снимок соперника. Матч отменён'); abortBattle(B, false); }
+  }, 15000));
+  maybeFinish(B);
+}
+
+async function maybeFinish(B) {
+  if (B.finished || !B.myShot || !B.oppShot) return;
+  B.finished = true; clearTimers(B);
+  let opp = B.oppShot, corrected = false;
+  if (B.witness && !B.witness.noFace && !opp.fromWitness && Math.abs(B.witness.score - opp.score) > 1.5) { opp = { ...B.witness }; corrected = true; }
+  const my = B.myShot, meIsA = B.role === 'a';
+  const sa = meIsA ? my.score : opp.score, sb2 = meIsA ? opp.score : my.score;
+  const iWin = meIsA ? sa >= sb2 : sb2 > sa;
+  S.battle = null; lockNav(false);
+  S.lastRoom = B.room; try { B.pc?.close(); } catch (e) {}
+  const achBefore = achSet(S.profile), tierBefore = tierOf(S.profile.elo).idx;
+  renderResult(B, my, opp, iWin, corrected);
+  let res = null;
+  try { res = await Net.report(B, my.score, opp.score, { me: my.cats, opp: opp.cats }); } catch (e) { console.error(e); }
+  const fresh = await Net.getProfile(S.user.id).catch(() => null);
+  if (fresh) S.profile = fresh;
+  let before = B.meBefore, after = S.profile.elo, winFinal = iWin;
+  if (res) { before = (meIsA ? res.elo_a_before : res.elo_b_before) ?? before; after = (meIsA ? res.elo_a_after : res.elo_b_after) ?? after; winFinal = res.winner === S.user.id; }
+  applyElo(B, before, after, winFinal, iWin, !res);
+  updateMe(true);
+  const achAfter = achSet(S.profile);
+  ACH.filter(a => achAfter.has(a.id) && !achBefore.has(a.id)).forEach((a, i) => setTimeout(() => { toast('Ачивка: ' + a.n, 'hot', a.ic); SFX.ach(); confetti(60, .15, .9); }, 3200 + i * 900));
+  const tAfter = tierOf(S.profile.elo);
+  if (tAfter.idx > tierBefore) setTimeout(() => { const v = $('#verdict'); if (v) v.insertAdjacentHTML('beforeend', `<span class="tierup">Новый ранг: ${tAfter.name}</span>`); confetti(140, .5, .2); SFX.ach(); }, 2800);
+  setTimeout(() => { if (S.lastRoom === B.room) { S.lastRoom = null; B.room.leave(); } }, 8000);
+}
+
+function sideHTML(key, prof, shot, other, win) {
+  return `
+  <div class="side ${key}-side ${win ? 'win' : ''}" id="side-${key}">
+    <div class="shot"><canvas id="cv-${key}"></canvas>${shot.noFace ? '<span class="noface">Лицо не найдено</span>' : ''}<span class="stamp" id="stamp-${key}">MOGGED</span></div>
+    <div class="side-head">
+      <div class="who">${ava(prof)}<div><b>${esc(prof.display_name)}</b><small>${fac(prof.faculty).short} · ${prof.elo} ELO</small></div></div>
+      <b class="score" data-to="${shot.score}">0.00</b>
+    </div>
+    <ul class="cats">${CATS.map(c => { const v = shot.cats?.[c.k] || 0, o = other.cats?.[c.k] || 0; return `<li class="${v > o ? 'better' : ''}"><span>${c.n}</span><span class="bar"><i data-v="${v / 10}"></i></span><b>${v.toFixed(1)}</b></li>`; }).join('')}</ul>
+  </div>`;
+}
+function renderResult(B, my, opp, iWin, corrected) {
+  S.view = 'result'; setNavOn('arena');
+  $('#main').innerHTML = `
+  <section class="result view">
+    <div class="verdict ${iWin ? 'win' : 'lose'}" id="verdict">
+      <p class="eyebrow">${B.ranked ? 'Рейтинговый бой' : 'Тренировка'} · vs ${esc(B.opp.display_name)}</p>
+      <h1 class="verdict-title" id="vTitle">${iWin ? 'Победа' : 'Замогали'}</h1>
+      <p class="elo-line"><span class="now" id="eloNow">${B.meBefore}</span><b class="d" id="eloD">считаем ELO…</b></p>
+    </div>
+    <div class="duel" id="duel">
+      ${sideHTML('me', S.profile, my, opp, iWin)}
+      <div class="vs-col">VS</div>
+      ${sideHTML('opp', B.opp, opp, my, !iWin)}
+    </div>
+    ${corrected ? '<p class="flag center">Счёт соперника пересчитан по видеопотоку: присланный снимок не совпал с трансляцией</p>' : ''}
+    <div class="result-actions">
+      <button class="btn primary" id="againBtn"><i data-lucide="swords"></i>Ещё бой <span class="kbd">R</span></button>
+      <button class="btn" id="arenaBtn">В арену</button>
+    </div>
+  </section>`;
+  icons();
+  $('#againBtn').onclick = again;
+  $('#arenaBtn').onclick = () => go('arena');
+  let done = 0;
+  const both = () => { if (++done === 2) reveal(); };
+  drawShot($('#cv-me'), my.img, my.lm, both);
+  drawShot($('#cv-opp'), opp.img, opp.lm, both);
+  function reveal() {
+    $$('.cats .bar i').forEach((i, k) => setTimeout(() => { i.style.transform = `scaleX(${i.dataset.v})`; }, (k % 6) * 70));
+    $$('.side-head .score').forEach(s => countUp(s, 0, +s.dataset.to, 1100, 2));
+    setTimeout(() => {
+      const st = $('#stamp-' + (iWin ? 'opp' : 'me')); if (!st) return;
+      st.classList.add('in'); SFX.stamp();
+      setTimeout(() => {
+        $('#duel')?.classList.add('shake');
+        if (iWin) { SFX.win(); confetti(220, .5, .3); setTimeout(() => confetti(90, .2, .5), 250); setTimeout(() => confetti(90, .8, .5), 400); }
+        else SFX.lose();
+      }, 420);
+    }, 1300);
   }
-});
+}
+function applyElo(B, before, after, winFinal, localWin, pending) {
+  const el = $('#eloNow'), dl = $('#eloD'); if (!el) return;
+  if (!B.ranked) { el.textContent = after; dl.textContent = 'тренировка, без ELO'; dl.className = 'd'; }
+  else if (pending && before === after) { el.textContent = after; dl.textContent = 'ELO обновится после подтверждения'; dl.className = 'd'; }
+  else { const d = after - before; dl.textContent = (d >= 0 ? '+' : '') + d; dl.className = 'd ' + (d >= 0 ? 'up' : 'down'); countUp(el, before, after, 1600); }
+  if (winFinal !== localWin) {
+    const v = $('#verdict'), t = $('#vTitle');
+    v.className = 'verdict ' + (winFinal ? 'win' : 'lose'); t.textContent = winFinal ? 'Победа' : 'Замогали';
+  }
+}
+function again() { go('arena'); setTimeout(startSearch, 350); }
+
+/* =================== leaderboard =================== */
+let boardFac = 'all';
+async function viewBoard() {
+  $('#main').innerHTML = `
+  <section class="board view">
+    <div class="board-head">
+      <div><p class="eyebrow">Рейтинг</p><h1 class="h-page">Таблица ELO</h1></div>
+      <div class="seg" id="facSeg">
+        <button data-f="all" aria-pressed="${boardFac === 'all'}">Все</button>
+        ${FACULTIES.map(f => `<button data-f="${f.id}" title="${f.name}" aria-pressed="${boardFac === f.id}">${f.short}</button>`).join('')}
+      </div>
+    </div>
+    <div>
+      <div class="row-head"><span>#</span><span></span><span>Игрок</span><span class="fc">Факультет</span><span class="wl">W / L</span><span>ELO</span></div>
+      <ol class="rows" id="boardRows">${'<li class="skel"></li>'.repeat(6)}</ol>
+    </div>
+  </section>`;
+  $$('[data-f]').forEach(b => b.onclick = () => { boardFac = b.dataset.f; SFX.click(); viewBoard(); });
+  try {
+    const rows = await Net.leaderboard(boardFac);
+    const ol = $('#boardRows'); if (!ol || S.view !== 'board') return;
+    if (!rows.length) { ol.outerHTML = `<div class="empty-state"><b>Здесь пока никого</b><span>Первый бой на этом факультете, и ты сразу в топе.</span><button class="btn primary sm" onclick="document.querySelector('[data-go=arena]').click()">В арену</button></div>`; return; }
+    ol.innerHTML = rows.map((p, i) => `
+      <li class="row ${i < 3 ? 'top' : ''} ${p.id === S.user.id ? 'me' : ''}" style="--i:${i}">
+        <span class="rk">${i + 1}</span>${ava(p)}
+        <span class="nm"><b>${esc(p.display_name)}${p.streak >= 3 ? ' 🔥' : ''}</b><small>@${esc(p.username)}</small>${tagsHTML(p.tags, 3)}</span>
+        <span class="fc">${fac(p.faculty).short}</span>
+        <span class="wl mono">${p.wins} / ${p.losses}</span>
+        <span class="el">${p.elo}</span>
+      </li>`).join('');
+  } catch (e) { const ol = $('#boardRows'); if (ol) ol.innerHTML = `<li class="empty-state"><b>Не загрузилось</b><span>${esc(e.message)}</span></li>`; }
+}
+
+/* =================== history =================== */
+async function viewHistory() {
+  $('#main').innerHTML = `
+  <section class="board view">
+    <div class="board-head">
+      <div><p class="eyebrow">История</p><h1 class="h-page">Твои бои</h1></div>
+      <div class="summary" id="hSum"></div>
+    </div>
+    <ol class="rows" id="hRows">${'<li class="skel"></li>'.repeat(5)}</ol>
+  </section>`;
+  try {
+    const uid = S.user.id, rows = await Net.history(uid);
+    const ol = $('#hRows'); if (!ol || S.view !== 'history') return;
+    if (!rows.length) { ol.outerHTML = `<div class="empty-state"><b>Боёв пока нет</b><span>Включи камеру и жми «В бой». Соперник подбирается в пределах ±${CONFIG.ELO_RANGE} ELO.</span><button class="btn primary sm" onclick="document.querySelector('[data-go=arena]').click()">В арену</button></div>`; return; }
+    let w = 0;
+    ol.innerHTML = rows.map((m, i) => {
+      const meA = m.player_a === uid, o = meA ? m.b : m.a, win = m.winner === uid; if (win) w++;
+      const ms = +(meA ? m.score_a : m.score_b), os = +(meA ? m.score_b : m.score_a);
+      const d = m.ranked ? (meA ? m.elo_a_after - m.elo_a_before : m.elo_b_after - m.elo_b_before) : null;
+      return `<li class="row hrow" style="--i:${i}">
+        <span class="res ${win ? 'w' : 'l'}">${win ? 'WIN' : 'LOSS'}</span>${ava(o)}
+        <span class="nm"><b>vs ${esc(o?.display_name)}</b><small>${fac(o?.faculty).short}${m.ranked ? '' : ' · тренировка'}</small></span>
+        <span class="sc">${ms.toFixed(2)} : ${os.toFixed(2)}</span>
+        <span class="dl ${d == null ? '' : d >= 0 ? 'up' : 'down'}">${d == null ? '·' : (d >= 0 ? '+' : '') + d}</span>
+        <span class="ago">${timeAgo(m.judged_at)}</span>
+      </li>`;
+    }).join('');
+    $('#hSum').innerHTML = `<span><b>${w}</b> W</span><span><b>${rows.length - w}</b> L</span>`;
+  } catch (e) { const ol = $('#hRows'); if (ol) ol.innerHTML = `<li class="empty-state"><b>Не загрузилось</b><span>${esc(e.message)}</span></li>`; }
+}
+
+/* =================== profile =================== */
+function normTag(t) { return t.replace(/^#+/, '').trim().toLowerCase().replace(/\s+/g, '_').slice(0, 20); }
+async function cropAvatar(file) {
+  const url = URL.createObjectURL(file);
+  const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+  const s = Math.min(img.naturalWidth, img.naturalHeight), c = document.createElement('canvas');
+  c.width = c.height = 320;
+  c.getContext('2d').drawImage(img, (img.naturalWidth - s) / 2, (img.naturalHeight - s) / 2, s, s, 0, 0, 320, 320);
+  URL.revokeObjectURL(url);
+  return await new Promise(res => c.toBlob(res, 'image/jpeg', .85));
+}
+function viewProfile() {
+  const isNew = !S.profile;
+  const p = S.profile || { display_name: '', username: '', faculty: '', bio: '', tags: [], avatar_url: null, elo: 1000, peak_elo: 1000, wins: 0, losses: 0, streak: 0, best_streak: 0 };
+  const form = { ...p, tags: [...(p.tags || [])] };
+  const t = tierOf(p.elo), got = achSet(p), total = p.wins + p.losses;
+  $('#main').innerHTML = `
+  <section class="prof view">
+    <div class="prof-left">
+      <label class="ava-edit" id="avaEdit">
+        <span id="avaBox">${p.avatar_url ? `<img src="${esc(p.avatar_url)}" alt="">` : `<span class="ini">${esc(initials(p.display_name || '?'))}</span>`}</span>
+        <span class="over"><i data-lucide="image-up"></i>Сменить аву</span>
+        <input type="file" accept="image/*" id="avaInput" aria-label="Загрузить аватар">
+      </label>
+      <div class="prof-id">
+        <h2>${isNew ? 'Новый боец' : esc(p.display_name)}</h2>
+        <p>${isNew ? 'Заполни профиль, чтобы выйти на арену' : `@${esc(p.username)} · ${fac(p.faculty).name}`}</p>
+        <span class="tier-badge">${t.name}</span>
+      </div>
+      <dl class="statlist">
+        <div><dt>ELO</dt><dd>${p.elo}</dd></div><div><dt>Пик</dt><dd>${p.peak_elo}</dd></div>
+        <div><dt>Победы</dt><dd>${p.wins}</dd></div><div><dt>Поражения</dt><dd>${p.losses}</dd></div>
+        <div><dt>Винрейт</dt><dd>${total ? Math.round(p.wins / total * 100) : 0}%</dd></div><div><dt>Лучшая серия</dt><dd>${p.best_streak}</dd></div>
+      </dl>
+      <div class="ach-block">
+        <div class="ach-title"><span class="eyebrow">Ачивки</span><span class="mono muted" style="font-size:.8rem">${got.size}/${ACH.length}</span></div>
+        <ul class="ach" style="margin-top:12px">${ACH.map(a => `<li class="${got.has(a.id) ? 'got' : ''}"><span class="ic"><i data-lucide="${a.ic}"></i></span><span><b>${a.n}</b>${a.d}</span></li>`).join('')}</ul>
+      </div>
+    </div>
+    <form class="prof-form" id="profForm" novalidate>
+      <div><p class="eyebrow">${isNew ? 'Шаг 1 из 1' : 'Настройки'}</p><h1 class="h-page">${isNew ? 'Заверши профиль' : 'Профиль'}</h1></div>
+      <div class="row2">
+        <div class="field"><label for="pName">Имя</label><input class="input" id="pName" maxlength="32" value="${esc(form.display_name)}"></div>
+        <div class="field"><label for="pUser">Юзернейм</label><input class="input" id="pUser" maxlength="20" value="${esc(form.username)}"></div>
+      </div>
+      <div class="field"><label for="pFac">Факультет</label>
+        <select class="select" id="pFac"><option value="">Выбери факультет</option>${FACULTIES.map(f => `<option value="${f.id}" ${form.faculty === f.id ? 'selected' : ''}>${f.name}</option>`).join('')}</select>
+      </div>
+      <div class="field"><label for="pBio">О себе</label><textarea class="input" id="pBio" maxlength="160" placeholder="Пара слов, которые увидит соперник">${esc(form.bio)}</textarea><span class="counter" id="bioCnt">${(form.bio || '').length}/160</span></div>
+      <div class="field">
+        <span class="lbl">Теги · до 6</span>
+        <div class="tag-input" id="tagBox"></div>
+        <div class="sugg" id="tagSugg"></div>
+      </div>
+      <p class="err" id="profErr"></p>
+      <div class="form-actions">
+        <button class="btn primary" id="saveBtn">${isNew ? 'На арену' : 'Сохранить'}<i data-lucide="${isNew ? 'arrow-right' : 'check'}"></i></button>
+        <button class="btn ghost" type="button" id="outBtn"><i data-lucide="log-out"></i>Выйти</button>
+      </div>
+    </form>
+  </section>`;
+  icons();
+
+  const renderTags = () => {
+    $('#tagBox').innerHTML = form.tags.map((t, i) => `<span class="chip">#${esc(t)}<button type="button" data-rm="${i}" aria-label="Убрать"><i data-lucide="x"></i></button></span>`).join('') +
+      (form.tags.length < 6 ? `<input id="tagIn" placeholder="${form.tags.length ? 'ещё тег' : 'например gym, кодинг'}" maxlength="20">` : '');
+    $('#tagSugg').innerHTML = form.tags.length < 6 ? TAG_SUGGEST.filter(s => !form.tags.includes(s)).slice(0, 8).map(s => `<button type="button" data-add="${esc(s)}">+ ${esc(s)}</button>`).join('') : '';
+    icons();
+    const inp = $('#tagIn');
+    if (inp) inp.onkeydown = e => {
+      if ((e.key === 'Enter' || e.key === ',') && inp.value.trim()) { e.preventDefault(); addTag(inp.value); }
+      else if (e.key === 'Backspace' && !inp.value && form.tags.length) { form.tags.pop(); renderTags(); $('#tagIn')?.focus(); }
+    };
+  };
+  const addTag = v => { const t = normTag(v); if (t && !form.tags.includes(t) && form.tags.length < 6) { form.tags.push(t); SFX.click(); } renderTags(); $('#tagIn')?.focus(); };
+  $('#tagBox').onclick = e => { const b = e.target.closest('[data-rm]'); if (b) { form.tags.splice(+b.dataset.rm, 1); renderTags(); } else $('#tagIn')?.focus(); };
+  $('#tagSugg').onclick = e => { const b = e.target.closest('[data-add]'); if (b) addTag(b.dataset.add); };
+  renderTags();
+  $('#pBio').oninput = e => { $('#bioCnt').textContent = e.target.value.length + '/160'; };
+
+  $('#avaInput').onchange = async e => {
+    const f = e.target.files?.[0]; if (!f) return;
+    if (!f.type.startsWith('image/')) { toast('Нужна картинка', 'hot'); return; }
+    const box = $('#avaEdit'); box.classList.add('busy');
+    try {
+      const blob = await cropAvatar(f);
+      const url = await Net.uploadAvatar(S.user.id, blob);
+      form.avatar_url = url;
+      $('#avaBox').innerHTML = `<img src="${esc(url)}" alt="">`;
+      if (!isNew) { S.profile = await Net.saveProfile(S.user.id, { avatar_url: url }, false); updateMe(); toast('Ава обновлена', '', 'check'); }
+    } catch (ex) { toast('Не загрузилось: ' + ex.message, 'hot'); }
+    box.classList.remove('busy');
+  };
+  $('#outBtn').onclick = async () => { await Net.signOut(); location.reload(); };
+  $('#profForm').onsubmit = async e => {
+    e.preventDefault();
+    const err = $('#profErr'), btn = $('#saveBtn'); err.textContent = '';
+    $$('.input,.select').forEach(i => i.removeAttribute('aria-invalid'));
+    const pending = $('#tagIn')?.value.trim(); if (pending) addTag(pending);
+    const patch = {
+      display_name: $('#pName').value.trim(), username: $('#pUser').value.trim(), faculty: $('#pFac').value,
+      bio: $('#pBio').value.trim(), tags: form.tags, avatar_url: form.avatar_url || null,
+    };
+    const bad = (id, m) => { $(id).setAttribute('aria-invalid', 'true'); err.textContent = m; $(id).focus(); };
+    if (patch.display_name.length < 2) return bad('#pName', 'Имя: от 2 символов');
+    if (!/^[a-zA-Z0-9_.]{3,20}$/.test(patch.username)) return bad('#pUser', 'Юзернейм: 3-20 символов, латиница, цифры, _ и .');
+    if (!patch.faculty) return bad('#pFac', 'Выбери факультет');
+    btn.classList.add('is-loading');
+    try {
+      S.profile = await Net.saveProfile(S.user.id, patch, isNew);
+      updateMe(true); toast(isNew ? 'Профиль готов. Погнали' : 'Сохранено', '', 'check');
+      if (isNew) { lockNav(false); startLive(); confetti(120, .5, .3); SFX.win(); go('arena'); }
+      else { btn.classList.remove('is-loading'); viewProfile(); }
+    } catch (ex) { btn.classList.remove('is-loading'); err.textContent = ex.message; }
+  };
+}
+
+/* =================== boot =================== */
+function startLive() {
+  if (S.liveStarted) return; S.liveStarted = true;
+  Net.lobby(S.user.id, n => { S.online = n; updateOnline(); });
+  Net.onFeed(() => loadFeed());
+  loadFeed();
+  loadLandmarker().catch(() => {});
+}
+async function boot() {
+  const u = await Net.session().catch(() => null);
+  if (!u) { renderAuth(); return; }
+  S.user = u;
+  S.profile = await Net.getProfile(u.id).catch(e => { console.error(e); return null; });
+  renderShell();
+  if (!S.profile) { lockNav(true); S.view = 'profile'; viewProfile(); return; }
+  startLive();
+  go('arena');
+}
 
 document.addEventListener('keydown', e => {
-  if (S.view === 'battle' || S.view === 'result' || e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-  if (e.key === '1') nav('arena');
-  if (e.key === '2') nav('board');
-  if (e.key === '3') nav('prof');
+  if (e.target.closest?.('input,textarea,select')) return;
+  if (!S.profile || S.battle) return;
+  const map = { '1': 'arena', '2': 'board', '3': 'history', '4': 'profile' };
+  if (map[e.key]) { go(map[e.key]); return; }
+  if (S.view === 'arena') {
+    if ((e.key === 'Enter' || e.code === 'Space') && !S.search && !e.target.closest?.('button')) { e.preventDefault(); startSearch(); }
+    if (e.key === 'Escape' && S.search) cancelSearch();
+  }
+  if (S.view === 'result' && (e.key.toLowerCase() === 'r' || e.key.toLowerCase() === 'к')) again();
+});
+addEventListener('beforeunload', () => {
+  try { S.battle?.room?.send('bye', {}); S.battle?.room?.leave(); } catch (e) {}
+  if (S.search) S.search.ac.abort();
 });
 
-async function boot() {
-  if (USE_SB) sb.auth.onAuthStateChange((evt, sess) => { if (evt === 'SIGNED_OUT') { S.user = null; nav('auth'); } });
-  try { S.user = await Net.session(); } catch (e) {}
-  if (S.user) {
-    try { S.profile = await Net.getProfile(S.user.id); } catch (e) {}
-    if (!S.profile) { S.user = null; await Net.signOut(); }
-  }
-  nav(S.user ? 'arena' : 'auth');
-  
-  if (S.user) {
-    Net.lobby(S.user.id, n => { S.online = Math.max(1, n); if (S.view === 'arena') render(); });
-    Net.onFeed(() => { if (S.view === 'arena') loadFeed(); });
-  }
-}
-
-window.onload = boot;
+boot();
 </script>
 </body>
 </html>
