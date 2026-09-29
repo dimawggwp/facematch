@@ -1,120 +1,2165 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ru">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FaceMatch - University Face-Off</title>
-    <!-- Подключаем Tailwind CSS для красивого дизайна -->
-    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
-    <!-- Подключаем библиотеку для анимации конфетти -->
-    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.5.1/dist/confetti.browser.min.js"></script>
+<!-- skill:chrome -->
+<style>
+/* Credit line — bottom-right */
+.design-ui-credit {
+  position: fixed;
+  bottom: 12px;
+  right: 12px;
+  font: 11px/1 system-ui, sans-serif;
+  color: rgba(128,128,128,0.5);
+  pointer-events: none;
+  z-index: 2147483647;
+  transition: opacity 0.4s ease;
+  user-select: none;
+  letter-spacing: 0.02em;
+}
+
+/* Hide chrome on touch devices */
+@media (hover: none) {
+  .design-ui-credit { display: none; }
+}
+
+/* Print fixes */
+@media print {
+  * {
+    transition: none !important;
+    animation: none !important;
+    box-shadow: none !important;
+  }
+  body {
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  .design-ui-credit { display: none !important; }
+}
+
+</style>
+<script>
+(function () {
+    // Design-ui pages are single compositions, so the whole body is editable.
+    function markEditable() {
+        document.body.classList.add('artifact-editable');
+    }
+
+    // Credit badge with idle-fade. Hover devices only.
+    function initChromeUI() {
+        if (!matchMedia('(hover: hover)').matches) return;
+
+        var credit = document.createElement('div');
+        credit.className = 'design-ui-credit';
+        credit.setAttribute('aria-hidden', 'true');
+        credit.innerHTML = '\u{1F49C} by ClickUp Brain';
+        document.body.appendChild(credit);
+
+        var timer = null;
+        var fade = function (out) { credit.style.opacity = out ? '0' : ''; };
+        fade(true);
+        var show = function () {
+            fade(false);
+            clearTimeout(timer);
+            timer = setTimeout(function () { fade(true); }, 3000);
+        };
+        document.addEventListener('mousemove', show);
+        show();
+    }
+
+    function init() {
+        markEditable();
+        initChromeUI();
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();
+
+</script>
+<!-- /skill:chrome -->
+<!-- skill:libraries -->
+<script src="https://cdn.jsdelivr.net/npm/lucide@0.383.0/dist/umd/lucide.min.js" integrity="sha384-wHFvAtjmgnkA2PJcMsDaCgdipf7X7YV44X/igbLHpvGiq6T5/PvFKl93grpvtbQT" crossorigin="anonymous"></script>
+<script>document.addEventListener("DOMContentLoaded",()=>lucide.createIcons())</script>
+<!-- /skill:libraries -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>MOGGED · Арена</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@600;800;900&family=Onest:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+
+<!--
+  MOGGED · Арена
+  ================================================================
+  1. Вставь SUPABASE_URL и SUPABASE_ANON_KEY в CONFIG (внизу, в <script type="module">).
+     Без ключей сайт работает в демо-режиме: данные в браузере, соперник = вторая вкладка.
+  2. Supabase → SQL Editor: вставь и запусти весь SQL из блока <script id="supabase-sql"> ниже.
+  3. Supabase → Authentication → Providers → Email: включён. Хочешь без подтверждения почты:
+     выключи "Confirm email".
+  4. Для игроков из разных сетей (мобильный интернет, NAT) добавь TURN-сервер в CONFIG.ICE.
+  ================================================================
+-->
+<script type="text/plain" id="supabase-sql">
+create extension if not exists pgcrypto;
+
+create table if not exists public.profiles (
+  id uuid primary key references auth.users on delete cascade,
+  username text unique not null check (username ~ '^[a-zA-Z0-9_.]{3,20}$'),
+  display_name text not null check (char_length(display_name) between 2 and 32),
+  faculty text not null check (faculty in ('digital','business','humanities','gov','medicine')),
+  bio text not null default '' check (char_length(bio) <= 160),
+  tags text[] not null default '{}' check (coalesce(array_length(tags,1),0) <= 6),
+  avatar_url text,
+  elo int not null default 1000,
+  peak_elo int not null default 1000,
+  wins int not null default 0,
+  losses int not null default 0,
+  streak int not null default 0,
+  best_streak int not null default 0,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.queue (
+  user_id uuid primary key references public.profiles on delete cascade,
+  elo int not null,
+  faculty text not null,
+  scope text not null default 'all',
+  ranked boolean not null default true,
+  match_id uuid,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.matches (
+  id uuid primary key default gen_random_uuid(),
+  player_a uuid not null references public.profiles on delete cascade,
+  player_b uuid not null references public.profiles on delete cascade,
+  ranked boolean not null default true,
+  status text not null default 'pending',
+  report_a jsonb, report_b jsonb,
+  score_a numeric, score_b numeric, winner uuid,
+  elo_a_before int, elo_b_before int, elo_a_after int, elo_b_after int,
+  created_at timestamptz not null default now(),
+  judged_at timestamptz
+);
+create index if not exists matches_judged_idx on public.matches (judged_at desc);
+
+alter table public.profiles enable row level security;
+alter table public.queue enable row level security;
+alter table public.matches enable row level security;
+
+create policy "profiles_read" on public.profiles for select using (true);
+create policy "profiles_insert_own" on public.profiles for insert to authenticated with check (auth.uid() = id);
+create policy "profiles_update_own" on public.profiles for update to authenticated using (auth.uid() = id);
+revoke insert, update on public.profiles from anon, authenticated;
+grant insert (id, username, display_name, faculty, bio, tags, avatar_url) on public.profiles to authenticated;
+grant update (username, display_name, faculty, bio, tags, avatar_url) on public.profiles to authenticated;
+
+create policy "matches_read" on public.matches for select using (true);
+
+create or replace function public.find_match(p_scope text default 'all', p_ranked boolean default true)
+returns uuid language plpgsql security definer set search_path = public as $$
+declare me profiles; other queue; mid uuid;
+begin
+  select * into me from profiles where id = auth.uid();
+  if not found then raise exception 'no profile'; end if;
+  delete from queue where user_id = me.id;
+  delete from queue where created_at < now() - interval '30 seconds' and match_id is null;
+  select q.* into other from queue q
+   where q.match_id is null and q.user_id <> me.id and q.ranked = p_ranked
+     and abs(q.elo - me.elo) <= 100
+     and ((p_scope <> 'faculty' and q.scope <> 'faculty') or q.faculty = me.faculty)
+   order by abs(q.elo - me.elo), q.created_at
+   limit 1 for update of q skip locked;
+  if other.user_id is null then
+    insert into queue(user_id, elo, faculty, scope, ranked) values (me.id, me.elo, me.faculty, p_scope, p_ranked);
+    return null;
+  end if;
+  insert into matches(player_a, player_b, ranked, elo_a_before, elo_b_before)
+    values (other.user_id, me.id, p_ranked, other.elo, me.elo) returning id into mid;
+  update queue set match_id = mid where user_id = other.user_id;
+  return mid;
+end $$;
+
+create or replace function public.poll_match()
+returns uuid language plpgsql security definer set search_path = public as $$
+declare mid uuid;
+begin
+  update queue set created_at = now() where user_id = auth.uid() and match_id is null;
+  delete from queue where user_id = auth.uid() and match_id is not null returning match_id into mid;
+  return mid;
+end $$;
+
+create or replace function public.cancel_queue()
+returns void language sql security definer set search_path = public as $$
+  delete from queue where user_id = auth.uid();
+$$;
+
+create or replace function public.cancel_match(p_match uuid)
+returns void language sql security definer set search_path = public as $$
+  update matches set status = 'cancelled'
+   where id = p_match and status = 'pending' and auth.uid() in (player_a, player_b);
+$$;
+
+create or replace function public.report_result(p_match uuid, p_self numeric, p_opp numeric, p_breakdown jsonb)
+returns void language plpgsql security definer set search_path = public as $$
+declare m matches; rep jsonb; sa numeric; sb numeric; w uuid; l uuid; ew int; el int; ea float; d int;
+begin
+  select * into m from matches where id = p_match for update;
+  if not found or m.status <> 'pending' then return; end if;
+  rep := jsonb_build_object('self', least(10, greatest(0, p_self)), 'opp', least(10, greatest(0, p_opp)), 'b', p_breakdown);
+  if auth.uid() = m.player_a then
+    update matches set report_a = rep where id = p_match; m.report_a := rep;
+  elsif auth.uid() = m.player_b then
+    update matches set report_b = rep where id = p_match; m.report_b := rep;
+  else raise exception 'not a player'; end if;
+  if m.report_a is null or m.report_b is null then return; end if;
+  sa := round(((m.report_a->>'self')::numeric + (m.report_b->>'opp')::numeric) / 2, 2);
+  sb := round(((m.report_b->>'self')::numeric + (m.report_a->>'opp')::numeric) / 2, 2);
+  w := case when sa >= sb then m.player_a else m.player_b end;
+  l := case when w = m.player_a then m.player_b else m.player_a end;
+  if m.ranked then
+    select elo into ew from profiles where id = w;
+    select elo into el from profiles where id = l;
+    ea := 1 / (1 + power(10, (el - ew) / 400.0));
+    d := greatest(8, round(32 * (1 - ea)));
+    update profiles set elo = elo + d, wins = wins + 1, streak = streak + 1,
+      best_streak = greatest(best_streak, streak + 1), peak_elo = greatest(peak_elo, elo + d) where id = w;
+    update profiles set elo = greatest(100, elo - d), losses = losses + 1, streak = 0 where id = l;
+  end if;
+  update matches set status = 'judged', score_a = sa, score_b = sb, winner = w, judged_at = now(),
+    elo_a_after = (select elo from profiles where id = m.player_a),
+    elo_b_after = (select elo from profiles where id = m.player_b)
+  where id = p_match;
+end $$;
+
+revoke execute on function public.find_match, public.poll_match, public.cancel_queue, public.cancel_match, public.report_result from anon;
+grant execute on function public.find_match, public.poll_match, public.cancel_queue, public.cancel_match, public.report_result to authenticated;
+
+alter publication supabase_realtime add table public.matches;
+
+insert into storage.buckets (id, name, public) values ('avatars', 'avatars', true) on conflict (id) do nothing;
+create policy "avatars_read" on storage.objects for select using (bucket_id = 'avatars');
+create policy "avatars_insert_own" on storage.objects for insert to authenticated
+  with check (bucket_id = 'avatars' and (storage.foldername(name))[1] = auth.uid()::text);
+create policy "avatars_update_own" on storage.objects for update to authenticated
+  using (bucket_id = 'avatars' and (storage.foldername(name))[1] = auth.uid()::text);
+</script>
+
+<style>
+:root{
+  --bg: oklch(13.5% 0.012 25);
+  --s1: oklch(17% 0.014 25);
+  --s2: oklch(20.5% 0.016 25);
+  --s3: oklch(25% 0.018 25);
+  --line: oklch(30% 0.02 25);
+  --line-soft: oklch(22.5% 0.016 25);
+  --tx: oklch(95.5% 0.008 25);
+  --tx2: oklch(76% 0.014 25);
+  --tx3: oklch(57% 0.016 25);
+  --red: oklch(58% 0.22 27);
+  --red-hi: oklch(65% 0.215 27);
+  --red-lo: oklch(42% 0.16 27);
+  --red-deep: oklch(22% 0.07 27);
+  --on-red: oklch(97% 0.012 25);
+  --ok: oklch(78% 0.12 150);
+
+  --f-display: 'Unbounded', 'Onest', system-ui, sans-serif;
+  --f-body: 'Onest', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --f-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  --sp-2xs: 4px; --sp-xs: 8px; --sp-sm: 12px; --sp-md: 16px; --sp-lg: 24px; --sp-xl: 32px; --sp-2xl: 48px; --sp-3xl: 72px; --sp-4xl: 96px;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-quart: cubic-bezier(0.25, 1, 0.5, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-io: cubic-bezier(0.65, 0, 0.35, 1);
+
+  --z-sticky: 20; --z-nav: 30; --z-toast: 60; --z-fx: 80;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{background:var(--bg);color:var(--tx);font-family:var(--f-body);font-size:16px;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;color-scheme:dark}
+body{min-height:100dvh;line-height:1.6;letter-spacing:.012em;font-weight:400;overflow-x:hidden}
+h1,h2,h3{text-wrap:balance;font-weight:700}
+p{text-wrap:pretty}
+button,input,select,textarea{font:inherit;color:inherit}
+button{background:none;border:0;cursor:pointer}
+a{color:inherit;text-decoration:none}
+img{display:block;max-width:100%}
+:focus-visible{outline:2px solid var(--red-hi);outline-offset:3px}
+::selection{background:var(--red);color:var(--on-red)}
+.mono{font-family:var(--f-mono);font-variant-numeric:tabular-nums;letter-spacing:0}
+.muted{color:var(--tx3)}
+.center{text-align:center}
+.kbd{font-family:var(--f-mono);font-size:.7rem;padding:2px 6px;border:1px solid currentColor;opacity:.7;line-height:1.3;letter-spacing:0}
+
+/* ---------- top bar ---------- */
+.top{position:sticky;top:0;z-index:var(--z-nav);display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:var(--sp-xl);height:68px;padding:0 var(--sp-xl);background:var(--bg);border-bottom:1px solid var(--line-soft)}
+.brand{display:flex;align-items:baseline;gap:10px;font-family:var(--f-display);font-weight:900;font-size:1.15rem;letter-spacing:.02em}
+.brand-mark{width:12px;height:12px;background:var(--red);align-self:center;transform:rotate(45deg);animation:markSpin 8s var(--ease-io) infinite}
+@keyframes markSpin{0%,80%{transform:rotate(45deg)}100%{transform:rotate(225deg)}}
+.brand-sub{font-family:var(--f-body);font-weight:500;font-size:.8rem;color:var(--tx3);letter-spacing:.02em}
+.nav{display:flex;gap:var(--sp-xl);justify-self:center}
+.nav a{position:relative;padding:22px 0;color:var(--tx3);font-weight:500;cursor:pointer;transition:color .2s var(--ease-out),opacity .2s;display:flex;align-items:center;gap:8px}
+.nav a:hover{color:var(--tx)}
+.nav a.on{color:var(--tx)}
+.nav a::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;background:var(--red);transform:scaleX(0);transform-origin:left;transition:transform .35s var(--ease-out)}
+.nav a.on::after{transform:scaleX(1)}
+.nav a .kbd{border-color:var(--line);color:var(--tx3);opacity:1;font-size:.62rem;padding:0 4px}
+.nav .ni{display:none}
+.nav-locked .nav a{pointer-events:none;opacity:.3}
+.top-r{display:flex;align-items:center;gap:var(--sp-sm)}
+.icon-btn{width:40px;height:40px;display:grid;place-items:center;border:1px solid var(--line-soft);color:var(--tx2);transition:color .2s,border-color .2s}
+.icon-btn:hover{color:var(--tx);border-color:var(--line)}
+.icon-btn svg{width:18px;height:18px}
+.me-chip{display:flex;align-items:center;gap:var(--sp-sm);cursor:pointer;padding:6px 6px 6px 14px;border:1px solid var(--line-soft);transition:border-color .2s}
+.me-chip:hover{border-color:var(--line)}
+.me-chip .elo{font-family:var(--f-mono);font-weight:600;font-size:.95rem}
+.me-chip .tier{font-size:.72rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.1em}
+.me-chip .elo.bump{animation:bump .8s var(--ease-out)}
+@keyframes bump{30%{color:var(--red-hi);transform:translateY(-3px)}}
+.ava{width:36px;height:36px;background:var(--s3);display:grid;place-items:center;font-family:var(--f-display);font-weight:700;font-size:.72rem;overflow:hidden;flex:none;color:var(--tx2)}
+.ava img{width:100%;height:100%;object-fit:cover}
+.ava.lg{width:56px;height:56px;font-size:1rem}
+.ava.xl{width:96px;height:96px;font-size:1.6rem}
+.demo-flag{position:fixed;right:var(--sp-md);bottom:var(--sp-md);z-index:var(--z-sticky);font-size:.7rem;color:var(--tx3);border:1px solid var(--line-soft);padding:4px 8px;background:var(--bg)}
+
+main{max-width:1340px;margin:0 auto;padding:var(--sp-2xl) var(--sp-xl) var(--sp-4xl)}
+.view{animation:viewIn .6s var(--ease-out) both}
+@keyframes viewIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+
+/* ---------- common controls ---------- */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:10px;min-height:48px;padding:0 22px;font-weight:600;border:1px solid var(--line);transition:background .2s var(--ease-out),border-color .2s,color .2s,transform .12s;white-space:nowrap;position:relative;overflow:hidden}
+.btn:hover{border-color:var(--tx3)}
+.btn:active{transform:scale(.97)}
+.btn[disabled]{opacity:.4;pointer-events:none}
+.btn.primary{background:var(--red);border-color:var(--red);color:var(--on-red)}
+.btn.primary:hover{background:var(--red-hi);border-color:var(--red-hi)}
+.btn.primary::after{content:"";position:absolute;top:0;bottom:0;width:40%;left:-60%;background:linear-gradient(100deg,transparent,oklch(90% 0.06 27 / .35),transparent);transform:skewX(-20deg);transition:left .7s var(--ease-out)}
+.btn.primary:hover::after{left:130%}
+.btn.ghost{border-color:transparent;color:var(--tx2)}
+.btn.ghost:hover{color:var(--tx);border-color:var(--line)}
+.btn.sm{min-height:36px;padding:0 14px;font-size:.875rem}
+.btn svg{width:18px;height:18px}
+.btn.is-loading{pointer-events:none;color:transparent}
+.btn.is-loading::before{content:"";position:absolute;width:18px;height:18px;border:2px solid var(--on-red);border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.seg{display:inline-flex;border:1px solid var(--line-soft);padding:3px;gap:3px;flex-wrap:wrap}
+.seg button{padding:8px 14px;font-size:.875rem;font-weight:500;color:var(--tx3);transition:color .2s,background .25s var(--ease-out);min-height:36px}
+.seg button:hover{color:var(--tx)}
+.seg button[aria-pressed="true"]{background:var(--s3);color:var(--tx)}
+
+.field{display:grid;gap:6px}
+.field label,.field .lbl{font-size:.8rem;color:var(--tx3);font-weight:500}
+.input,.select{height:48px;padding:0 14px;background:var(--s1);border:1px solid var(--line-soft);transition:border-color .2s,background .2s;width:100%;border-radius:0;appearance:none}
+textarea.input{height:auto;min-height:96px;padding:12px 14px;resize:vertical;line-height:1.5}
+.input::placeholder{color:var(--tx3)}
+.input:hover,.select:hover{border-color:var(--line)}
+.input:focus,.select:focus{outline:none;border-color:var(--red);background:var(--s2)}
+.input[aria-invalid="true"],.select[aria-invalid="true"]{border-color:var(--red)}
+.select{background-image:linear-gradient(45deg,transparent 50%,var(--tx3) 50%),linear-gradient(135deg,var(--tx3) 50%,transparent 50%);background-position:calc(100% - 20px) 21px,calc(100% - 15px) 21px;background-size:5px 5px;background-repeat:no-repeat;padding-right:40px}
+.select option{background:var(--s1)}
+.err{color:var(--red-hi);font-size:.8rem;min-height:1.2em}
+.hint{font-size:.75rem;color:var(--tx3)}
+
+.eyebrow{font-size:.75rem;text-transform:uppercase;letter-spacing:.12em;color:var(--tx3);font-weight:600}
+.h-page{font-family:var(--f-display);font-weight:800;font-size:clamp(2rem,4.2vw,3.4rem);line-height:1.02;letter-spacing:-.01em}
+
+.tags{display:flex;flex-wrap:wrap;gap:6px}
+.tag{font-size:.75rem;padding:3px 8px;background:var(--s2);color:var(--tx2);border:1px solid var(--line-soft);line-height:1.4}
+
+/* ---------- auth ---------- */
+.auth{min-height:100dvh;display:grid;grid-template-columns:1.1fr 1fr}
+.auth-poster{background:var(--red);color:var(--on-red);padding:var(--sp-2xl) var(--sp-3xl);display:flex;flex-direction:column;justify-content:space-between;position:relative;overflow:hidden}
+.auth-poster .brand{color:var(--on-red)}
+.auth-poster .brand-mark{background:var(--on-red)}
+.auth-poster .brand-sub{color:oklch(88% 0.05 27)}
+.poster-title{font-family:var(--f-display);font-weight:900;font-size:clamp(3.4rem,8.5vw,8.5rem);line-height:.9;letter-spacing:-.02em;margin:var(--sp-2xl) 0}
+.poster-title span{display:block;animation:lineUp .9s var(--ease-out) both}
+.poster-title span:nth-child(2){animation-delay:.08s}
+.poster-title span:nth-child(3){animation-delay:.16s}
+@keyframes lineUp{from{transform:translateY(40%);opacity:0}to{transform:none;opacity:1}}
+.poster-title .outline{color:transparent;-webkit-text-stroke:2px var(--on-red)}
+.poster-rules{display:grid;grid-template-columns:repeat(3,auto);gap:var(--sp-xl);justify-content:start;border-top:1px solid oklch(72% 0.13 27);padding-top:var(--sp-lg)}
+.poster-rules b{display:block;font-family:var(--f-mono);font-size:1.6rem;font-weight:600;line-height:1.2}
+.poster-rules span{font-size:.85rem;color:oklch(90% 0.04 27)}
+.poster-grid{position:absolute;inset:0;pointer-events:none;background-image:linear-gradient(oklch(64% 0.2 27) 1px,transparent 1px),linear-gradient(90deg,oklch(64% 0.2 27) 1px,transparent 1px);background-size:64px 64px;mask-image:linear-gradient(120deg,transparent 30%,black 100%);-webkit-mask-image:linear-gradient(120deg,transparent 30%,black 100%);animation:gridDrift 18s linear infinite}
+@keyframes gridDrift{to{background-position:64px 64px,64px 64px}}
+.poster-rules,.poster-title,.auth-poster .brand{position:relative}
+.auth-form-wrap{display:grid;place-items:center;padding:var(--sp-2xl) var(--sp-xl)}
+.auth-form{width:100%;max-width:420px;display:grid;gap:var(--sp-md)}
+.auth-form h1{font-family:var(--f-display);font-size:1.8rem;font-weight:800;margin-bottom:var(--sp-2xs)}
+.auth-form .lead{color:var(--tx2);margin-bottom:var(--sp-sm)}
+.auth-tabs{margin-bottom:var(--sp-md)}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-sm)}
+.auth-form .btn{width:100%;margin-top:var(--sp-xs)}
+.auth-note{font-size:.8rem;color:var(--tx3)}
+.reg-only[hidden]{display:none}
+
+/* ---------- arena ---------- */
+.arena{display:grid;grid-template-columns:300px minmax(0,1fr) 270px;gap:var(--sp-2xl);align-items:start}
+.arena-center{display:grid;gap:var(--sp-lg)}
+.arena-head{display:flex;justify-content:space-between;align-items:end;gap:var(--sp-md);flex-wrap:wrap}
+.arena-head .h-page{font-size:clamp(1.8rem,3vw,2.6rem)}
+.controls{display:flex;gap:var(--sp-sm);flex-wrap:wrap}
+
+.launch{position:relative;display:flex;flex-direction:column;justify-content:space-between;min-height:460px;width:100%;padding:var(--sp-xl) var(--sp-xl) var(--sp-lg);text-align:left;background:var(--red);color:var(--on-red);overflow:hidden;transition:background .3s var(--ease-out),transform .15s;animation:viewIn .5s var(--ease-out) both}
+button.launch::before{content:"";position:absolute;inset:0;background:radial-gradient(420px circle at var(--mx,70%) var(--my,30%),oklch(72% 0.19 27 / .55),transparent 60%);opacity:0;transition:opacity .4s;pointer-events:none}
+button.launch:hover::before{opacity:1}
+button.launch:hover .launch-arrow{transform:translate(6px,-6px)}
+button.launch:active{transform:scale(.995)}
+.launch-eyebrow{font-size:.75rem;text-transform:uppercase;letter-spacing:.12em;font-weight:600;opacity:.85;position:relative}
+.launch-title{font-family:var(--f-display);font-weight:900;font-size:clamp(2.8rem,6.2vw,5.6rem);line-height:.92;letter-spacing:-.02em;position:relative}
+.launch-foot{display:flex;justify-content:space-between;align-items:center;font-size:.9rem;position:relative;gap:var(--sp-md)}
+.launch-foot b{font-weight:600;font-family:var(--f-mono)}
+.launch-arrow{position:absolute;right:var(--sp-xl);top:var(--sp-xl);width:44px;height:44px;transition:transform .4s var(--ease-out)}
+.launch-lines{position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(90deg,transparent 0 47px,oklch(63% 0.2 27) 47px 48px);opacity:.55;mask-image:linear-gradient(to left,black,transparent 70%);-webkit-mask-image:linear-gradient(to left,black,transparent 70%);animation:linesMove 6s linear infinite}
+@keyframes linesMove{to{background-position:48px 0}}
+.launch.is-searching,.launch.is-found{background:var(--s1);color:var(--tx);border:1px solid var(--line-soft)}
+.launch.is-found{border-color:var(--red)}
+.reel{font-family:var(--f-display);font-weight:800;font-size:clamp(2rem,4.6vw,3.8rem);line-height:1;height:1.1em;overflow:hidden;color:var(--tx3);position:relative}
+.reel span{display:block;animation:reelIn .6s var(--ease-out) both}
+@keyframes reelIn{from{transform:translateY(100%);opacity:0}to{transform:none;opacity:1}}
+.search-meta{display:flex;align-items:end;gap:var(--sp-xl);flex-wrap:wrap;position:relative}
+.search-meta .big{font-size:2.4rem;font-weight:600;line-height:1;color:var(--tx)}
+.search-meta small{display:block;font-size:.8rem;color:var(--tx3)}
+.search-meta b{font-family:var(--f-mono);font-weight:600}
+.scan-bars{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.scan-bars::before{content:"";position:absolute;left:0;right:0;top:0;height:40%;background:linear-gradient(to bottom,transparent,var(--red-deep));animation:sweep 2.4s var(--ease-io) infinite}
+@keyframes sweep{from{transform:translateY(-100%)}to{transform:translateY(260%)}}
+.radar{position:absolute;right:var(--sp-xl);top:var(--sp-xl);width:120px;height:120px;border:1px solid var(--line);border-radius:50%;pointer-events:none}
+.radar::before,.radar::after{content:"";position:absolute;inset:0;border-radius:50%;border:1px solid var(--red);animation:ping 2.4s var(--ease-out) infinite}
+.radar::after{animation-delay:1.2s}
+@keyframes ping{from{transform:scale(.2);opacity:1}to{transform:scale(1.6);opacity:0}}
+.found-wrap{display:flex;align-items:center;gap:var(--sp-lg);position:relative}
+.found-wrap .ava{animation:foundIn .7s var(--ease-out) both}
+@keyframes foundIn{from{transform:scale(.6);opacity:0}to{transform:none;opacity:1}}
+.found-name{color:var(--tx);font-size:clamp(2rem,4.4vw,3.6rem)!important}
+.found-meta{color:var(--tx2);font-size:.95rem;margin-top:var(--sp-xs);display:block}
+.found-bar{height:2px;background:var(--line-soft);position:relative;overflow:hidden}
+.found-bar i{position:absolute;inset:0;background:var(--red);transform-origin:left;animation:fill 1.9s linear forwards}
+@keyframes fill{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+.launch-actions{display:flex;justify-content:space-between;align-items:center;gap:var(--sp-md);position:relative;flex-wrap:wrap}
+
+.stats-strip{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--line-soft);border-bottom:1px solid var(--line-soft)}
+.stats-strip div{padding:var(--sp-md) var(--sp-md) var(--sp-md) 0}
+.stats-strip div+div{padding-left:var(--sp-md);border-left:1px solid var(--line-soft)}
+.stats-strip b{display:flex;align-items:center;gap:6px;font-family:var(--f-mono);font-weight:600;font-size:1.5rem;line-height:1.2}
+.stats-strip small{font-size:.75rem;color:var(--tx3)}
+.flame{width:20px;height:20px;color:var(--red-hi);animation:flicker 1.3s var(--ease-io) infinite}
+@keyframes flicker{50%{transform:scale(1.15) rotate(-6deg);opacity:.8}}
+
+/* you panel */
+.you{display:grid;gap:var(--sp-md)}
+.cam-slot{position:relative;aspect-ratio:4/5;background:var(--s1);border:1px solid var(--line-soft);display:grid;place-items:center;overflow:hidden;transition:border-color .4s}
+.cam-slot video,.cam-slot canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);opacity:0;transition:opacity .6s var(--ease-out)}
+.cam-slot.on video,.cam-slot.on canvas{opacity:1}
+.cam-slot.on .empty{display:none}
+.cam-slot.face-ok{border-color:oklch(78% 0.12 150 / .6)}
+.cam-slot .empty{display:grid;gap:var(--sp-xs);justify-items:center;text-align:center;padding:var(--sp-lg);color:var(--tx3);font-size:.875rem;position:relative}
+.cam-slot .empty svg{width:28px;height:28px;color:var(--tx2)}
+.cam-slot .empty b{color:var(--tx);font-weight:600;font-size:1rem}
+.cam-state{position:absolute;left:var(--sp-sm);bottom:var(--sp-sm);font-size:.72rem;padding:5px 9px;background:var(--bg);color:var(--tx2);display:flex;align-items:center;gap:6px;opacity:0;transition:opacity .3s}
+.cam-slot.on .cam-state{opacity:1}
+.cam-state::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--tx3)}
+.cam-slot.face-ok .cam-state::before{background:var(--ok)}
+.viewfinder{position:absolute;inset:14px;pointer-events:none;background:
+  linear-gradient(var(--tx2) 0 0) top left/18px 2px no-repeat,linear-gradient(var(--tx2) 0 0) top left/2px 18px no-repeat,
+  linear-gradient(var(--tx2) 0 0) top right/18px 2px no-repeat,linear-gradient(var(--tx2) 0 0) top right/2px 18px no-repeat,
+  linear-gradient(var(--tx2) 0 0) bottom left/18px 2px no-repeat,linear-gradient(var(--tx2) 0 0) bottom left/2px 18px no-repeat,
+  linear-gradient(var(--tx2) 0 0) bottom right/18px 2px no-repeat,linear-gradient(var(--tx2) 0 0) bottom right/2px 18px no-repeat;opacity:.6;z-index:2}
+.you-name{display:flex;justify-content:space-between;align-items:baseline;gap:var(--sp-sm)}
+.you-name h3{font-size:1.1rem;font-weight:600}
+.you-name .mono{font-size:1.1rem;font-weight:600}
+.you-meta{font-size:.85rem;color:var(--tx3);margin-top:-8px}
+.checks{list-style:none;display:grid;gap:6px;font-size:.85rem;border-top:1px solid var(--line-soft);padding-top:var(--sp-sm)}
+.checks li{display:grid;grid-template-columns:16px 1fr auto;gap:10px;align-items:center;color:var(--tx2)}
+.checks li svg{width:16px;height:16px}
+.checks li.ok svg{color:var(--ok)}
+.checks li.bad{color:var(--tx)}
+.checks li.bad svg{color:var(--red-hi)}
+.checks li small{color:var(--tx3);font-size:.75rem}
+
+.tierbar{display:grid;gap:6px}
+.tierbar .track{height:4px;background:var(--s3);position:relative;overflow:hidden}
+.tierbar .track i{position:absolute;inset:0;background:var(--red);transform-origin:left;transform:scaleX(0);transition:transform 1.1s var(--ease-out)}
+.tierbar .lbl{display:flex;justify-content:space-between;font-size:.75rem;color:var(--tx3)}
+.tierbar .lbl b{color:var(--tx2);font-weight:600}
+
+/* feed */
+.feed{display:grid;gap:var(--sp-md)}
+.feed-head{display:flex;justify-content:space-between;align-items:center}
+.live{display:inline-flex;align-items:center;gap:8px;font-size:.8rem;color:var(--tx2)}
+.live::before{content:"";width:7px;height:7px;background:var(--red);border-radius:50%;animation:pulse 1.8s var(--ease-out) infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 oklch(58% 0.22 27 / .6)}70%,100%{box-shadow:0 0 0 8px oklch(58% 0.22 27 / 0)}}
+.feed-online{display:flex;align-items:baseline;gap:8px;padding-bottom:var(--sp-md);border-bottom:1px solid var(--line-soft)}
+.feed-online b{font-family:var(--f-display);font-weight:800;font-size:2.4rem;line-height:1}
+.feed-online span{color:var(--tx3);font-size:.85rem;line-height:1.3}
+.feed ol{list-style:none;display:grid}
+.feed li{padding:10px 0;border-bottom:1px solid var(--line-soft);font-size:.875rem;color:var(--tx2);line-height:1.45;animation:feedIn .5s var(--ease-out) both;animation-delay:calc(var(--i,0) * 40ms)}
+.feed li b{color:var(--tx);font-weight:600}
+.feed li .v{color:var(--red-hi);font-weight:600;font-family:var(--f-mono);letter-spacing:0}
+.feed li .meta{display:block;font-size:.72rem;color:var(--tx3);margin-top:2px}
+.feed .quiet{color:var(--tx3);font-size:.85rem;padding:var(--sp-md) 0}
+@keyframes feedIn{from{opacity:0;transform:translateX(8px)}to{opacity:1;transform:none}}
+
+/* ---------- battle ---------- */
+.battle{display:grid;gap:var(--sp-xl)}
+.battle-top{display:flex;justify-content:space-between;align-items:end;gap:var(--sp-md);flex-wrap:wrap}
+.battle-h{font-size:clamp(1.6rem,3vw,2.4rem)}
+.room-status{font-family:var(--f-mono);font-size:.85rem;color:var(--tx2);display:flex;align-items:center;gap:10px;letter-spacing:0}
+.dots{display:inline-flex;gap:4px}
+.dots i{width:10px;height:10px;background:var(--s3);transition:background .4s,transform .4s var(--ease-out)}
+.dots i.on{background:var(--red);transform:rotate(45deg)}
+.stage{display:grid;grid-template-columns:minmax(0,1fr) 210px minmax(0,1fr);gap:var(--sp-lg);align-items:center}
+.tile{position:relative;aspect-ratio:3/4;background:var(--s1);border:1px solid var(--line-soft);overflow:hidden;transition:border-color .4s}
+.tile video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.tile.me video{transform:scaleX(-1)}
+.tile.opp video{opacity:0;transition:opacity .8s var(--ease-out)}
+.tile.opp.connected video{opacity:1}
+.tile.opp.joined{border-color:var(--line)}
+.tile.hot{border-color:var(--red)}
+.tile figcaption{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:10px;padding:var(--sp-md);background:linear-gradient(to top,oklch(13.5% 0.012 25 / .9),transparent);z-index:3}
+.tile .who b{display:block;font-weight:600;line-height:1.2}
+.tile .who small{color:var(--tx3);font-size:.75rem}
+.tile .elo-tag{margin-left:auto;font-family:var(--f-mono);font-weight:600}
+.tile-wait{position:absolute;inset:0;display:grid;place-content:center;justify-items:center;gap:var(--sp-sm);text-align:center;color:var(--tx2);transition:opacity .6s var(--ease-out);font-size:.9rem;padding:var(--sp-lg)}
+.tile-wait b{color:var(--tx);font-size:1.1rem}
+.tile.connected .tile-wait{opacity:0;pointer-events:none}
+.tile-wait .ava{animation:breathe 2.2s var(--ease-io) infinite}
+.tile.joined .tile-wait .ava{animation:none;outline:2px solid var(--red);outline-offset:6px}
+@keyframes breathe{50%{transform:scale(1.06);box-shadow:0 0 0 14px oklch(58% 0.22 27 / .12)}}
+.tile .scan{position:absolute;inset:0;pointer-events:none;opacity:0;overflow:hidden;z-index:2;transition:opacity .3s}
+.tile .scan::before{content:"";position:absolute;left:0;right:0;top:0;height:35%;background:linear-gradient(to bottom,transparent,oklch(58% 0.22 27 / .45));border-bottom:2px solid var(--red-hi);animation:sweep 1.4s var(--ease-io) infinite}
+.tile.analyzing .scan{opacity:1}
+.tile .flash{position:absolute;inset:0;background:var(--tx);opacity:0;pointer-events:none;z-index:4}
+.tile.shot .flash{animation:shutter .7s var(--ease-out)}
+@keyframes shutter{0%{opacity:.95}100%{opacity:0}}
+.mid{display:grid;justify-items:center;gap:var(--sp-md);text-align:center}
+.ring{position:relative;width:190px;height:190px}
+.ring svg{width:100%;height:100%;display:block}
+.ring circle{fill:none;stroke-width:5}
+.ring .bg{stroke:var(--s3)}
+.ring .fg{stroke:var(--red);transition:stroke .3s}
+.ring b{position:absolute;inset:0;display:grid;place-items:center;font-family:var(--f-display);font-weight:900;font-size:4.2rem;line-height:1;font-variant-numeric:tabular-nums}
+.ring b.pop{animation:pop .7s var(--ease-out)}
+@keyframes pop{from{transform:scale(1.9);opacity:0}to{transform:none;opacity:1}}
+.ring.hot .fg{stroke:var(--red-hi)}
+.ring.hot b{color:var(--red-hi)}
+.ring.hot{animation:ringPulse 1s var(--ease-out) infinite}
+@keyframes ringPulse{0%{transform:scale(1)}15%{transform:scale(1.04)}100%{transform:scale(1)}}
+.ring.idle b{font-size:1.6rem;color:var(--tx3);font-family:var(--f-mono);font-weight:600}
+.ring.idle .fg{stroke-dasharray:40 299.29;animation:spin 2.4s linear infinite;transform-origin:60px 60px}
+.mid-label{font-size:.9rem;color:var(--tx2);max-width:210px;min-height:3em}
+.battle-foot{display:flex;justify-content:space-between;align-items:center;gap:var(--sp-md);flex-wrap:wrap;color:var(--tx3);font-size:.85rem}
+.battle-foot .tip{display:flex;align-items:center;gap:8px}
+.battle-foot .tip svg{width:18px;height:18px;color:var(--tx2)}
+
+/* ---------- result ---------- */
+.result{display:grid;gap:var(--sp-2xl)}
+.verdict{display:grid;justify-items:center;text-align:center;gap:var(--sp-xs)}
+.verdict-title{font-family:var(--f-display);font-weight:900;font-size:clamp(3rem,9vw,7.5rem);line-height:.9;letter-spacing:-.02em;text-transform:uppercase;animation:slam .9s var(--ease-out) both}
+.verdict.win .verdict-title{color:var(--red)}
+.verdict.lose .verdict-title{color:var(--tx2)}
+@keyframes slam{from{transform:scale(1.7);opacity:0;filter:blur(10px)}to{transform:none;opacity:1;filter:none}}
+.elo-line{display:flex;align-items:baseline;gap:var(--sp-sm);font-family:var(--f-mono);letter-spacing:0}
+.elo-line .now{font-size:2rem;font-weight:600}
+.elo-line .d{font-size:1.1rem;font-weight:600;color:var(--tx3)}
+.elo-line .d.up{color:var(--ok)}
+.elo-line .d.down{color:var(--red-hi)}
+.tierup{font-size:.8rem;padding:6px 12px;background:var(--red);color:var(--on-red);font-weight:600;animation:foundIn .6s var(--ease-out) both}
+.duel{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:var(--sp-xl);align-items:start}
+.side{display:grid;gap:var(--sp-md);animation:viewIn .7s var(--ease-out) both}
+.side.opp-side{animation-delay:.1s}
+.shot{position:relative;background:var(--s1);border:1px solid var(--line-soft);overflow:hidden;aspect-ratio:3/4;transition:border-color .5s}
+.shot canvas{width:100%;height:100%;object-fit:cover;display:block}
+.side.win .shot{border-color:var(--red)}
+.noface{position:absolute;inset:0;display:grid;place-items:center;color:var(--tx3);font-size:.9rem}
+.stamp{position:absolute;top:50%;left:50%;font-family:var(--f-display);font-weight:900;font-size:clamp(1.6rem,3.6vw,2.8rem);color:var(--red-hi);border:4px solid var(--red-hi);padding:4px 16px;transform:translate(-50%,-50%) rotate(-12deg) scale(2.6);opacity:0;letter-spacing:.04em;background:oklch(13.5% 0.012 25 / .4);pointer-events:none;z-index:2}
+.stamp.in{animation:stamp .45s var(--ease-in) forwards}
+@keyframes stamp{to{transform:translate(-50%,-50%) rotate(-12deg) scale(1);opacity:1}}
+.shake{animation:shake .5s}
+@keyframes shake{10%,90%{transform:translate(-2px,1px)}20%,80%{transform:translate(4px,-2px)}30%,50%,70%{transform:translate(-6px,2px)}40%,60%{transform:translate(6px,-1px)}}
+.side-head{display:flex;justify-content:space-between;align-items:center;gap:var(--sp-sm)}
+.side-head .who{display:flex;align-items:center;gap:10px;min-width:0}
+.side-head .who b{display:block;font-weight:600;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.side-head .who small{color:var(--tx3);font-size:.75rem}
+.side-head .score{font-family:var(--f-display);font-weight:800;font-size:2.4rem;line-height:1;font-variant-numeric:tabular-nums}
+.side.win .side-head .score{color:var(--red-hi)}
+.cats{list-style:none;display:grid;gap:10px}
+.cats li{display:grid;grid-template-columns:128px 1fr 36px;gap:var(--sp-sm);align-items:center;font-size:.85rem;color:var(--tx2)}
+.cats .bar{height:4px;background:var(--s3);position:relative;overflow:hidden}
+.cats .bar i{position:absolute;inset:0;background:var(--tx3);transform:scaleX(0);transform-origin:left;transition:transform 1.1s var(--ease-out)}
+.side.win .cats .bar i{background:var(--red)}
+.cats b{font-family:var(--f-mono);text-align:right;color:var(--tx);font-weight:600}
+.cats li.better b{color:var(--red-hi)}
+.vs-col{align-self:center;font-family:var(--f-display);font-weight:900;font-size:1.4rem;color:var(--tx3);padding-bottom:30%}
+.result-actions{display:flex;justify-content:center;gap:var(--sp-sm);flex-wrap:wrap}
+.flag{font-size:.8rem;color:var(--tx3)}
+
+/* ---------- board / history ---------- */
+.board{display:grid;gap:var(--sp-xl)}
+.board-head{display:flex;justify-content:space-between;align-items:end;gap:var(--sp-md);flex-wrap:wrap}
+.rows{list-style:none;display:grid}
+.row{display:grid;grid-template-columns:56px 44px minmax(0,1fr) 100px 90px 90px;gap:var(--sp-md);align-items:center;padding:14px var(--sp-sm);border-bottom:1px solid var(--line-soft);animation:feedIn .5s var(--ease-out) both;animation-delay:calc(min(var(--i,0),14) * 35ms);transition:background .2s}
+.row:hover{background:var(--s1)}
+.row.me{background:var(--s2)}
+.row .rk{font-family:var(--f-mono);font-weight:600;color:var(--tx3)}
+.row.top .rk{color:var(--red-hi);font-family:var(--f-display);font-weight:900;font-size:1.3rem}
+.row .nm{min-width:0}
+.row .nm b{display:block;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .nm small{color:var(--tx3);font-size:.78rem}
+.row .nm .tags{margin-top:4px}
+.row .fc,.row .wl{font-size:.85rem;color:var(--tx2)}
+.row .el{font-family:var(--f-mono);font-weight:600;text-align:right;font-size:1.05rem}
+.row-head{display:grid;grid-template-columns:56px 44px minmax(0,1fr) 100px 90px 90px;gap:var(--sp-md);padding:0 var(--sp-sm) var(--sp-xs);font-size:.72rem;text-transform:uppercase;letter-spacing:.1em;color:var(--tx3);border-bottom:1px solid var(--line-soft)}
+.row-head span:last-child{text-align:right}
+.hrow{grid-template-columns:64px 44px minmax(0,1fr) 120px 80px 100px}
+.hrow .res{font-family:var(--f-display);font-weight:800;font-size:.8rem;letter-spacing:.08em}
+.hrow .res.w{color:var(--red-hi)}
+.hrow .res.l{color:var(--tx3)}
+.hrow .sc{font-family:var(--f-mono);font-size:.9rem}
+.hrow .dl{font-family:var(--f-mono);font-weight:600;text-align:right}
+.hrow .dl.up{color:var(--ok)}
+.hrow .dl.down{color:var(--red-hi)}
+.hrow .ago{font-size:.8rem;color:var(--tx3);text-align:right}
+.skel{height:66px;background:linear-gradient(90deg,var(--s1),var(--s2),var(--s1));background-size:200% 100%;animation:shimmer 1.4s linear infinite;border-bottom:1px solid var(--bg)}
+@keyframes shimmer{to{background-position:-200% 0}}
+.empty-state{padding:var(--sp-3xl) 0;text-align:center;color:var(--tx3);display:grid;gap:var(--sp-md);justify-items:center}
+.empty-state b{color:var(--tx);font-size:1.1rem;font-weight:600}
+.summary{display:flex;gap:var(--sp-xl);font-family:var(--f-mono);color:var(--tx2);letter-spacing:0}
+.summary b{color:var(--tx);font-size:1.4rem}
+
+/* ---------- profile ---------- */
+.prof{display:grid;grid-template-columns:340px minmax(0,1fr);gap:var(--sp-3xl);align-items:start}
+.prof-left{display:grid;gap:var(--sp-lg)}
+.ava-edit{position:relative;display:block;aspect-ratio:1;background:var(--s1);border:1px solid var(--line-soft);overflow:hidden;cursor:pointer;transition:border-color .2s}
+.ava-edit:hover{border-color:var(--red)}
+.ava-edit img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;animation:foundIn .6s var(--ease-out)}
+.ava-edit .ini{display:grid;place-items:center;height:100%;font-family:var(--f-display);font-weight:800;font-size:4rem;color:var(--tx3)}
+.ava-edit .over{position:absolute;left:0;right:0;bottom:0;padding:12px 14px;background:var(--bg);font-size:.85rem;color:var(--tx2);display:flex;align-items:center;gap:8px;transform:translateY(100%);transition:transform .35s var(--ease-out)}
+.ava-edit .over svg{width:16px;height:16px}
+.ava-edit:hover .over,.ava-edit:focus-within .over{transform:none}
+.ava-edit.busy::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,oklch(58% 0.22 27 / .25),transparent);background-size:200% 100%;animation:shimmer 1s linear infinite}
+.ava-edit input{position:absolute;inset:0;opacity:0;cursor:pointer}
+.prof-id h2{font-family:var(--f-display);font-weight:800;font-size:1.8rem;line-height:1.1}
+.prof-id p{color:var(--tx3);font-size:.9rem;margin-top:4px}
+.tier-badge{display:inline-flex;align-items:center;gap:8px;margin-top:var(--sp-sm);font-size:.75rem;text-transform:uppercase;letter-spacing:.1em;font-weight:600;color:var(--tx2)}
+.tier-badge::before{content:"";width:10px;height:10px;background:var(--red);transform:rotate(45deg)}
+.statlist{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid var(--line-soft)}
+.statlist div{padding:14px 0;border-bottom:1px solid var(--line-soft)}
+.statlist div:nth-child(even){padding-left:var(--sp-md);border-left:1px solid var(--line-soft)}
+.statlist dt{font-size:.75rem;color:var(--tx3)}
+.statlist dd{font-family:var(--f-mono);font-weight:600;font-size:1.3rem}
+.ach-title{display:flex;justify-content:space-between;align-items:baseline}
+.ach{list-style:none;display:grid;gap:10px}
+.ach li{display:grid;grid-template-columns:34px 1fr;gap:12px;align-items:center;color:var(--tx3);font-size:.8rem}
+.ach li .ic{width:34px;height:34px;display:grid;place-items:center;background:var(--s2);color:var(--tx3)}
+.ach li .ic svg{width:16px;height:16px}
+.ach li.got{color:var(--tx2)}
+.ach li.got .ic{background:var(--red);color:var(--on-red)}
+.ach li b{display:block;font-weight:600;font-size:.9rem;color:var(--tx3)}
+.ach li.got b{color:var(--tx)}
+.prof-form{display:grid;gap:var(--sp-lg);max-width:640px}
+.counter{font-size:.72rem;color:var(--tx3);justify-self:end}
+.tag-input{display:flex;flex-wrap:wrap;gap:6px;min-height:48px;padding:8px;background:var(--s1);border:1px solid var(--line-soft);align-items:center;transition:border-color .2s}
+.tag-input:focus-within{border-color:var(--red)}
+.tag-input input{flex:1;min-width:120px;background:none;border:0;outline:none;height:30px;padding:0 6px}
+.chip{display:inline-flex;align-items:center;gap:6px;font-size:.8rem;padding:4px 6px 4px 10px;background:var(--s3);animation:foundIn .35s var(--ease-out) both}
+.chip button{width:18px;height:18px;display:grid;place-items:center;color:var(--tx3)}
+.chip button:hover{color:var(--red-hi)}
+.chip button svg{width:12px;height:12px}
+.sugg{display:flex;flex-wrap:wrap;gap:6px}
+.sugg button{font-size:.75rem;padding:4px 10px;border:1px dashed var(--line);color:var(--tx3);transition:color .2s,border-color .2s}
+.sugg button:hover{color:var(--tx);border-color:var(--red)}
+.form-actions{display:flex;gap:var(--sp-sm);justify-content:space-between;flex-wrap:wrap;padding-top:var(--sp-sm)}
+
+/* ---------- toasts & fx ---------- */
+.toasts{position:fixed;left:var(--sp-md);bottom:var(--sp-md);z-index:var(--z-toast);display:grid;gap:8px;pointer-events:none}
+.toast{background:var(--s2);border:1px solid var(--line);padding:12px 16px;font-size:.875rem;display:flex;gap:10px;align-items:center;animation:toastIn .5s var(--ease-out) both;max-width:360px}
+.toast svg{width:18px;height:18px;flex:none}
+.toast.out{animation:toastOut .3s var(--ease-in) forwards}
+.toast.hot{background:var(--red);border-color:var(--red);color:var(--on-red)}
+@keyframes toastIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+@keyframes toastOut{to{opacity:0;transform:translateX(-16px)}}
+#fx{position:fixed;inset:0;pointer-events:none;z-index:var(--z-fx);width:100%;height:100%}
+
+/* ---------- responsive ---------- */
+@media (max-width:1180px){
+  .arena{grid-template-columns:260px minmax(0,1fr)}
+  .feed{grid-column:1/-1}
+}
+@media (max-width:860px){
+  .top{grid-template-columns:auto auto;justify-content:space-between;padding:0 var(--sp-md);gap:var(--sp-md);height:60px}
+  .brand-sub{display:none}
+  .nav{position:fixed;left:0;right:0;bottom:0;background:var(--bg);border-top:1px solid var(--line-soft);justify-content:space-around;gap:0;padding-bottom:env(safe-area-inset-bottom);z-index:var(--z-nav)}
+  .nav a{flex-direction:column;gap:2px;padding:10px 12px;font-size:.7rem}
+  .nav .ni{display:block;width:20px;height:20px}
+  .nav a .kbd{display:none}
+  .nav a::after{top:-1px;bottom:auto}
+  .me-chip .tier{display:none}
+  main{padding:var(--sp-lg) var(--sp-md) 120px}
+  .arena{grid-template-columns:1fr;gap:var(--sp-xl)}
+  .you{grid-template-columns:140px 1fr;align-items:start}
+  .you .cam-slot{grid-row:span 4}
+  .you .checks,.you .tierbar{grid-column:1/-1}
+  .launch{min-height:360px;padding:var(--sp-lg)}
+  .stats-strip{grid-template-columns:repeat(2,1fr)}
+  .stats-strip div:nth-child(3){padding-left:0;border-left:0}
+  .stats-strip div:nth-child(n+3){border-top:1px solid var(--line-soft)}
+  .stage{grid-template-columns:1fr 1fr;gap:var(--sp-sm)}
+  .mid{grid-column:1/-1;order:-1;grid-template-columns:auto 1fr;text-align:left;gap:var(--sp-lg)}
+  .ring{width:110px;height:110px}
+  .ring b{font-size:2.6rem}
+  .ring.idle b{font-size:1.1rem}
+  .tile{aspect-ratio:3/4}
+  .tile figcaption{padding:var(--sp-xs);gap:6px}
+  .tile figcaption .ava{display:none}
+  .tile .who small{display:none}
+  .duel{grid-template-columns:1fr 1fr;gap:var(--sp-md)}
+  .vs-col{display:none}
+  .cats li{grid-template-columns:1fr 32px;gap:4px 8px;font-size:.78rem}
+  .cats .bar{grid-column:1/-1;grid-row:2}
+  .side-head{flex-direction:column;align-items:flex-start}
+  .side-head .who .ava{display:none}
+  .side-head .score{font-size:1.9rem}
+  .auth{grid-template-columns:1fr}
+  .auth-poster{padding:var(--sp-xl) var(--sp-lg)}
+  .poster-title{margin:var(--sp-xl) 0;font-size:clamp(3rem,15vw,5rem)}
+  .prof{grid-template-columns:1fr;gap:var(--sp-2xl)}
+  .prof-left{grid-template-columns:120px 1fr;align-items:start}
+  .prof-left .statlist,.prof-left .ach-block{grid-column:1/-1}
+  .row,.row-head{grid-template-columns:32px 40px minmax(0,1fr) 64px}
+  .row .fc,.row .wl,.row-head .fc,.row-head .wl{display:none}
+  .hrow{grid-template-columns:44px minmax(0,1fr) 80px 56px}
+  .hrow .ava,.hrow .ago{display:none}
+  .demo-flag{bottom:76px}
+  .toasts{bottom:80px}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
+}
+</style>
 </head>
-<body class="bg-neutral-950 text-white min-h-screen flex flex-col items-center justify-center p-4">
+<body>
+<div id="app"></div>
+<canvas id="fx"></canvas>
+<div class="toasts" id="toasts" aria-live="polite"></div>
 
-    <div class="max-w-md w-full bg-neutral-900 border border-red-900/40 rounded-2xl p-6 shadow-2xl shadow-red-950/30 text-center">
-        <h1 class="text-3xl font-black tracking-wider text-red-500 mb-2">FACEMATCH</h1>
-        <p class="text-neutral-400 text-sm mb-6">Университетский батл пропорций лица</p>
+<script type="module">
+/* =================== CONFIG =================== */
+const CONFIG = {
+  SUPABASE_URL: '',        // https://xxxx.supabase.co
+  SUPABASE_ANON_KEY: '',   // anon public key
+  BATTLE_SECONDS: 10,
+  ELO_RANGE: 100,
+  ICE: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    // { urls: 'turn:your-turn.example.com:3478', username: 'user', credential: 'pass' },
+  ],
+};
 
-        <!-- Шаг 1: Выбор ID и фото -->
-        <div id="setup-screen" class="space-y-4">
-            <input type="text" id="user-id" placeholder="Твой ник или UUID игрока" class="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-red-600">
-            
-            <label class="block w-full border-2 border-dashed border-neutral-800 hover:border-red-600/50 rounded-xl p-6 cursor-pointer transition">
-                <span id="file-label" class="text-sm text-neutral-400">Загрузить свое фото</span>
-                <input type="file" id="photo-input" accept="image/*" class="hidden">
-            </label>
+/* =================== helpers =================== */
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const initials = n => (n || '?').trim().split(/\s+/).slice(0, 2).map(s => s[0]).join('').toUpperCase();
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+async function sha(s) { const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)); return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join(''); }
+const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 3 | 8)).toString(16); }));
 
-            <button onclick="startBattle()" class="w-full bg-red-600 hover:bg-red-500 font-bold py-3 rounded-xl transition shadow-lg shadow-red-600/20">
-                НАЙТИ СОПЕРНИКА
-            </button>
+function icons() { try { window.lucide?.createIcons(); } catch (e) {} }
+if (!window.lucide) {
+  const s = document.createElement('script');
+  s.src = 'https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js';
+  s.onload = icons; document.head.appendChild(s);
+}
+
+function timeAgo(t) {
+  if (!t) return '';
+  const s = Math.max(1, Math.round((Date.now() - new Date(t).getTime()) / 1000));
+  if (s < 60) return 'только что';
+  if (s < 3600) return Math.round(s / 60) + ' мин назад';
+  if (s < 86400) return Math.round(s / 3600) + ' ч назад';
+  return Math.round(s / 86400) + ' дн назад';
+}
+
+function countUp(el, from, to, dur = 1200, dec = 0) {
+  if (!el) return;
+  const t0 = performance.now();
+  const f = now => {
+    const t = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - t, 4);
+    el.textContent = (from + (to - from) * e).toFixed(dec);
+    if (t < 1) requestAnimationFrame(f);
+  };
+  requestAnimationFrame(f);
+}
+
+function toast(msg, kind = '', icon = '') {
+  const box = $('#toasts'); if (!box) return;
+  const t = document.createElement('div');
+  t.className = 'toast ' + kind;
+  t.innerHTML = (icon ? `<i data-lucide="${icon}"></i>` : '') + `<span>${esc(msg)}</span>`;
+  box.appendChild(t); icons();
+  setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 320); }, 3800);
+}
+
+/* =================== domain =================== */
+const FACULTIES = [
+  { id: 'digital', name: 'Цифровые технологии', short: 'ЦТ' },
+  { id: 'business', name: 'Бизнес, экономика и маркетинг', short: 'БЭМ' },
+  { id: 'humanities', name: 'Гуманитарные науки', short: 'ГН' },
+  { id: 'gov', name: 'Государственное управление', short: 'ГУ' },
+  { id: 'medicine', name: 'Медицина', short: 'МЕД' },
+];
+const fac = id => FACULTIES.find(f => f.id === id) || { name: 'Факультет', short: '?' };
+const TAG_SUGGEST = ['gym', 'кодинг', 'аниме', 'футбол', 'музыка', 'дизайн', 'стартапы', 'кофе', 'книги', 'путешествия', 'киберспорт', 'фото'];
+const TIERS = [
+  { n: 'Новичок', min: 0 }, { n: 'Бронза', min: 900 }, { n: 'Серебро', min: 1000 }, { n: 'Золото', min: 1100 },
+  { n: 'Платина', min: 1250 }, { n: 'Алмаз', min: 1400 }, { n: 'Мог-лорд', min: 1600 },
+];
+function tierOf(elo) {
+  let i = 0; TIERS.forEach((t, j) => { if (elo >= t.min) i = j; });
+  const cur = TIERS[i], next = TIERS[i + 1];
+  return { name: cur.n, idx: i, next, pct: next ? clamp((elo - cur.min) / (next.min - cur.min), 0, 1) : 1 };
+}
+const ACH = [
+  { id: 'first', n: 'Первая кровь', d: 'Первая победа', ok: p => p.wins >= 1, ic: 'sword' },
+  { id: 's3', n: 'Разогнался', d: '3 победы подряд', ok: p => p.best_streak >= 3, ic: 'flame' },
+  { id: 's5', n: 'Неудержимый', d: '5 побед подряд', ok: p => p.best_streak >= 5, ic: 'zap' },
+  { id: 'w10', n: 'Десятка', d: '10 побед', ok: p => p.wins >= 10, ic: 'medal' },
+  { id: 'p1200', n: 'Золотой пик', d: 'ELO 1200+', ok: p => p.peak_elo >= 1200, ic: 'crown' },
+  { id: 'g25', n: 'Завсегдатай', d: '25 боёв', ok: p => (p.wins + p.losses) >= 25, ic: 'repeat' },
+];
+const achSet = p => new Set(p ? ACH.filter(a => a.ok(p)).map(a => a.id) : []);
+function ava(p, size = '') {
+  return `<span class="ava ${size}">${p?.avatar_url ? `<img src="${esc(p.avatar_url)}" alt="">` : esc(initials(p?.display_name))}</span>`;
+}
+const tagsHTML = (tags = [], max = 6) => tags.length ? `<div class="tags">${tags.slice(0, max).map(t => `<span class="tag">#${esc(t)}</span>`).join('')}</div>` : '';
+
+/* =================== state =================== */
+const S = {
+  user: null, profile: null, view: 'arena',
+  scope: localStorage.getItem('mog_scope') || 'all',
+  ranked: localStorage.getItem('mog_ranked') !== '0',
+  search: null, battle: null, online: 1, feed: [],
+  muted: localStorage.getItem('mog_muted') === '1',
+  model: 'idle', faceOk: false, liveStarted: false,
+};
+
+/* =================== sound =================== */
+let actx = null;
+function tone(freq, dur = .12, type = 'sine', vol = .08, when = 0) {
+  if (S.muted) return;
+  try {
+    actx ||= new (window.AudioContext || window.webkitAudioContext)();
+    const t = actx.currentTime + when, o = actx.createOscillator(), g = actx.createGain();
+    o.type = type; o.frequency.setValueAtTime(freq, t);
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + .01); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g).connect(actx.destination); o.start(t); o.stop(t + dur + .02);
+  } catch (e) {}
+}
+function noise(dur = .12, vol = .15) {
+  if (S.muted) return;
+  try {
+    actx ||= new (window.AudioContext || window.webkitAudioContext)();
+    const len = actx.sampleRate * dur, buf = actx.createBuffer(1, len, actx.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3);
+    const src = actx.createBufferSource(), f = actx.createBiquadFilter(), g = actx.createGain();
+    f.type = 'highpass'; f.frequency.value = 1800; g.gain.value = vol;
+    src.buffer = buf; src.connect(f).connect(g).connect(actx.destination); src.start();
+  } catch (e) {}
+}
+const SFX = {
+  click: () => tone(520, .05, 'square', .025),
+  tick: () => tone(880, .07, 'square', .045),
+  count: () => tone(440, .16, 'triangle', .1),
+  go: () => { tone(660, .12, 'triangle', .1); tone(990, .24, 'triangle', .1, .1); },
+  shutter: () => noise(.14, .22),
+  found: () => { tone(740, .1, 'sine', .08); tone(1110, .2, 'sine', .08, .08); },
+  win: () => [523, 659, 784, 1047].forEach((f, i) => tone(f, .28, 'triangle', .09, i * .09)),
+  lose: () => [392, 330, 262].forEach((f, i) => tone(f, .32, 'sine', .07, i * .14)),
+  stamp: () => { tone(90, .25, 'sawtooth', .12); noise(.08, .18); },
+  ach: () => [880, 1175, 1568].forEach((f, i) => tone(f, .18, 'sine', .07, i * .07)),
+};
+
+/* =================== confetti =================== */
+const fx = $('#fx'), fctx = fx.getContext('2d');
+let parts = [], fxRunning = false;
+function sizeFx() { fx.width = innerWidth * devicePixelRatio; fx.height = innerHeight * devicePixelRatio; }
+addEventListener('resize', sizeFx); sizeFx();
+function confetti(n = 180, ox = .5, oy = .35) {
+  const cols = ['#e2403f', '#f5e9e6', '#ff6b5e', '#7fd49a', '#b92b2e'];
+  const W = fx.width, H = fx.height;
+  for (let i = 0; i < n; i++) {
+    parts.push({ x: W * ox, y: H * oy, vx: (Math.random() - .5) * 26 * devicePixelRatio, vy: (-Math.random() * 18 - 6) * devicePixelRatio,
+      g: .45 * devicePixelRatio, w: (6 + Math.random() * 7) * devicePixelRatio, h: (3 + Math.random() * 4) * devicePixelRatio,
+      r: Math.random() * 6.28, vr: (Math.random() - .5) * .35, c: cols[i % cols.length], life: 1 });
+  }
+  if (!fxRunning) { fxRunning = true; requestAnimationFrame(fxLoop); }
+}
+function fxLoop() {
+  fctx.clearRect(0, 0, fx.width, fx.height);
+  parts = parts.filter(p => p.life > 0 && p.y < fx.height + 40);
+  for (const p of parts) {
+    p.vx *= .985; p.vy += p.g; p.x += p.vx; p.y += p.vy; p.r += p.vr; p.life -= .006;
+    fctx.save(); fctx.globalAlpha = Math.max(0, p.life); fctx.translate(p.x, p.y); fctx.rotate(p.r);
+    fctx.fillStyle = p.c; fctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h * Math.abs(Math.cos(p.r * 2))); fctx.restore();
+  }
+  if (parts.length) requestAnimationFrame(fxLoop); else { fxRunning = false; fctx.clearRect(0, 0, fx.width, fx.height); }
+}
+
+/* =================== backend =================== */
+let sb = null;
+if (CONFIG.SUPABASE_URL && CONFIG.SUPABASE_ANON_KEY) {
+  try {
+    const m = await import('https://esm.sh/@supabase/supabase-js@2.45.4');
+    sb = m.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
+  } catch (e) { console.error('Supabase load failed', e); }
+}
+const USE_SB = !!sb;
+
+const MATCH_COLS = 'id,player_a,player_b,score_a,score_b,winner,ranked,elo_a_before,elo_b_before,elo_a_after,elo_b_after,judged_at,' +
+  'a:profiles!matches_player_a_fkey(display_name,avatar_url,faculty),b:profiles!matches_player_b_fkey(display_name,avatar_url,faculty)';
+
+function SupaNet() {
+  const sbErr = e => { if (e?.code === '23505') return new Error('Юзернейм уже занят'); return new Error(e?.message || 'Ошибка сервера'); };
+  function room(id, uid) {
+    const handlers = {}; let presCb = () => {};
+    const ch = sb.channel('room:' + id, { config: { presence: { key: uid }, broadcast: { self: false } } });
+    ch.on('broadcast', { event: 'm' }, ({ payload }) => (handlers[payload.t] || []).forEach(f => f(payload.d)));
+    ch.on('presence', { event: 'sync' }, () => presCb(Object.keys(ch.presenceState())));
+    const ready = new Promise(res => ch.subscribe(async s => { if (s === 'SUBSCRIBED') { await ch.track({ t: Date.now() }); res(); } }));
+    return {
+      ready,
+      send: (t, d) => ch.send({ type: 'broadcast', event: 'm', payload: { t, d } }),
+      on: (t, f) => (handlers[t] ||= []).push(f),
+      onPresence: f => { presCb = f; },
+      leave: () => { try { sb.removeChannel(ch); } catch (e) {} },
+    };
+  }
+  return {
+    async session() { const { data } = await sb.auth.getSession(); return data.session?.user || null; },
+    async signIn(email, pass) { const { data, error } = await sb.auth.signInWithPassword({ email, password: pass }); if (error) throw new Error(error.message === 'Invalid login credentials' ? 'Неверная почта или пароль' : error.message); return data.user; },
+    async signUp(email, pass, prof) {
+      localStorage.setItem('mog_pending_profile', JSON.stringify(prof));
+      const { data, error } = await sb.auth.signUp({ email, password: pass });
+      if (error) throw new Error(error.message);
+      return data.session ? { user: data.user } : { confirm: true };
+    },
+    async signOut() { await sb.auth.signOut(); },
+    async getProfile(uid) {
+      const { data, error } = await sb.from('profiles').select('*').eq('id', uid).maybeSingle();
+      if (error) throw sbErr(error);
+      if (data) return data;
+      const pend = JSON.parse(localStorage.getItem('mog_pending_profile') || 'null');
+      if (pend) {
+        const r = await sb.from('profiles').insert({ id: uid, ...pend }).select().single();
+        if (!r.error) { localStorage.removeItem('mog_pending_profile'); return r.data; }
+      }
+      return null;
+    },
+    async saveProfile(uid, patch, isNew) {
+      const q = isNew ? sb.from('profiles').insert({ id: uid, ...patch }) : sb.from('profiles').update(patch).eq('id', uid);
+      const { data, error } = await q.select().single();
+      if (error) throw sbErr(error);
+      return data;
+    },
+    async uploadAvatar(uid, blob) {
+      const path = `${uid}/${Date.now()}.jpg`;
+      const { error } = await sb.storage.from('avatars').upload(path, blob, { contentType: 'image/jpeg', upsert: true });
+      if (error) throw sbErr(error);
+      return sb.storage.from('avatars').getPublicUrl(path).data.publicUrl;
+    },
+    lobby(uid, cb) {
+      const ch = sb.channel('lobby', { config: { presence: { key: uid } } });
+      ch.on('presence', { event: 'sync' }, () => cb(Object.keys(ch.presenceState()).length))
+        .subscribe(async s => { if (s === 'SUBSCRIBED') await ch.track({ t: Date.now() }); });
+    },
+    async findMatch(opts, signal) {
+      let { data: mid, error } = await sb.rpc('find_match', { p_scope: opts.scope, p_ranked: opts.ranked });
+      if (error) throw sbErr(error);
+      let role = 'b';
+      while (!mid) {
+        if (signal.aborted) { await sb.rpc('cancel_queue'); return null; }
+        await sleep(1500);
+        if (signal.aborted) { await sb.rpc('cancel_queue'); return null; }
+        const r = await sb.rpc('poll_match');
+        if (r.error) throw sbErr(r.error);
+        mid = r.data; role = 'a';
+      }
+      const { data: m, error: e2 } = await sb.from('matches').select('*').eq('id', mid).single();
+      if (e2) throw sbErr(e2);
+      const { data: opp } = await sb.from('profiles').select('*').eq('id', role === 'a' ? m.player_b : m.player_a).single();
+      return { id: mid, role, opp, ranked: m.ranked };
+    },
+    room,
+    async report(B, self, opp, breakdown) {
+      const { error } = await sb.rpc('report_result', { p_match: B.id, p_self: self, p_opp: opp, p_breakdown: breakdown });
+      if (error) throw sbErr(error);
+      for (let i = 0; i < 14; i++) {
+        const { data } = await sb.from('matches').select('*').eq('id', B.id).single();
+        if (data?.status === 'judged') return data;
+        await sleep(900);
+      }
+      return null;
+    },
+    async cancelMatch(id) { await sb.rpc('cancel_match', { p_match: id }); },
+    async leaderboard(f) {
+      let q = sb.from('profiles').select('id,display_name,username,faculty,tags,avatar_url,elo,wins,losses,streak').order('elo', { ascending: false }).limit(50);
+      if (f !== 'all') q = q.eq('faculty', f);
+      const { data, error } = await q; if (error) throw sbErr(error); return data;
+    },
+    async history(uid) {
+      const { data, error } = await sb.from('matches').select(MATCH_COLS).or(`player_a.eq.${uid},player_b.eq.${uid}`).eq('status', 'judged').order('judged_at', { ascending: false }).limit(30);
+      if (error) throw sbErr(error); return data;
+    },
+    async feed() {
+      const { data, error } = await sb.from('matches').select(MATCH_COLS).eq('status', 'judged').order('judged_at', { ascending: false }).limit(12);
+      if (error) throw sbErr(error); return data;
+    },
+    onFeed(cb) {
+      sb.channel('feed').on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'matches' }, p => { if (p.new?.status === 'judged') cb(); }).subscribe();
+    },
+  };
+}
+
+/* Demo: всё в браузере, соперник = другая вкладка (BroadcastChannel) */
+function DemoNet() {
+  const bc = new BroadcastChannel('mogged-demo');
+  const listeners = new Set();
+  bc.onmessage = e => listeners.forEach(f => f(e.data));
+  const post = m => bc.postMessage(m);
+  const reg = () => JSON.parse(localStorage.getItem('mog_demo_players') || '{}');
+  const saveReg = r => localStorage.setItem('mog_demo_players', JSON.stringify(r));
+  const getMatches = () => JSON.parse(localStorage.getItem('mog_demo_matches') || '[]');
+  const saveMatch = m => { const all = getMatches().filter(x => x.id !== m.id); all.unshift(m); localStorage.setItem('mog_demo_matches', JSON.stringify(all.slice(0, 200))); };
+  let myId = sessionStorage.getItem('mog_demo_uid');
+  const pub = p => { if (!p) return p; const { email, pass, ...rest } = p; return rest; };
+  const lite = p => ({ display_name: p?.display_name, avatar_url: p?.avatar_url, faculty: p?.faculty });
+
+  return {
+    async session() { return myId && reg()[myId] ? { id: myId } : null; },
+    async signIn(email, pass) {
+      const h = await sha(pass);
+      const p = Object.values(reg()).find(x => x.email === email.toLowerCase());
+      if (!p || p.pass !== h) throw new Error('Неверная почта или пароль');
+      myId = p.id; sessionStorage.setItem('mog_demo_uid', myId); return { id: myId };
+    },
+    async signUp(email, pass, prof) {
+      const r = reg();
+      if (Object.values(r).some(x => x.email === email.toLowerCase())) throw new Error('Эта почта уже зарегистрирована');
+      if (Object.values(r).some(x => x.username.toLowerCase() === prof.username.toLowerCase())) throw new Error('Юзернейм уже занят');
+      const id = uuid();
+      r[id] = { id, email: email.toLowerCase(), pass: await sha(pass), ...prof, bio: '', tags: [], avatar_url: null, elo: 1000, peak_elo: 1000, wins: 0, losses: 0, streak: 0, best_streak: 0, created_at: new Date().toISOString() };
+      saveReg(r); myId = id; sessionStorage.setItem('mog_demo_uid', id); return { user: { id } };
+    },
+    async signOut() { sessionStorage.removeItem('mog_demo_uid'); myId = null; },
+    async getProfile(uid) { return pub(reg()[uid]) || null; },
+    async saveProfile(uid, patch) {
+      const r = reg();
+      if (patch.username && Object.values(r).some(x => x.id !== uid && x.username.toLowerCase() === patch.username.toLowerCase())) throw new Error('Юзернейм уже занят');
+      r[uid] = { ...r[uid], ...patch }; saveReg(r); return pub(r[uid]);
+    },
+    async uploadAvatar(uid, blob) { return await new Promise(res => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(blob); }); },
+    lobby(uid, cb) {
+      const seen = new Map();
+      listeners.add(m => { if (m.k === 'hb') seen.set(m.id, Date.now()); });
+      const beat = () => post({ k: 'hb', id: uid });
+      beat(); setInterval(beat, 2000);
+      setInterval(() => { const now = Date.now(); for (const [k, v] of seen) if (now - v > 5000) seen.delete(k); seen.set(uid, now); cb(seen.size); }, 1000);
+    },
+    findMatch(opts, signal) {
+      return new Promise(resolve => {
+        let done = false, pendOffer = null, pendAccept = null;
+        const finish = v => { if (done) return; done = true; clearInterval(iv); listeners.delete(onMsg); resolve(v); };
+        const compatible = s => s.id !== myId && s.ranked === opts.ranked && Math.abs(s.elo - opts.elo) <= CONFIG.ELO_RANGE &&
+          ((opts.scope !== 'faculty' && s.scope !== 'faculty') || s.faculty === opts.faculty);
+        const onMsg = m => {
+          if (done) return;
+          if (m.k === 'seek' && compatible(m) && myId < m.id && !pendOffer && !pendAccept) {
+            pendOffer = { mid: uuid(), to: m.id, at: Date.now() };
+            post({ k: 'pair', mid: pendOffer.mid, from: myId, to: m.id, ranked: opts.ranked });
+          } else if (m.k === 'pair' && m.to === myId && !pendOffer && !pendAccept) {
+            pendAccept = { mid: m.mid, from: m.from, ranked: m.ranked, at: Date.now() };
+            post({ k: 'accept', mid: m.mid, from: myId, to: m.from });
+          } else if (m.k === 'accept' && m.to === myId && pendOffer && m.mid === pendOffer.mid) {
+            post({ k: 'confirm', mid: m.mid, from: myId, to: m.from });
+            finish({ id: m.mid, role: 'a', opp: pub(reg()[m.from]), ranked: opts.ranked });
+          } else if (m.k === 'confirm' && m.to === myId && pendAccept && m.mid === pendAccept.mid) {
+            finish({ id: m.mid, role: 'b', opp: pub(reg()[m.from]), ranked: pendAccept.ranked });
+          }
+        };
+        listeners.add(onMsg);
+        const iv = setInterval(() => {
+          if (signal.aborted) return finish(null);
+          const now = Date.now();
+          if (pendOffer && now - pendOffer.at > 2500) pendOffer = null;
+          if (pendAccept && now - pendAccept.at > 2500) pendAccept = null;
+          if (!pendOffer && !pendAccept) post({ k: 'seek', id: myId, elo: opts.elo, faculty: opts.faculty, scope: opts.scope, ranked: opts.ranked });
+        }, 1000);
+        signal.addEventListener('abort', () => finish(null));
+      });
+    },
+    room(id, uid) {
+      const handlers = {}; let presCb = () => {}; const peers = new Map();
+      const emit = () => presCb([uid, ...peers.keys()]);
+      const onMsg = m => {
+        if (m.k !== 'room' || m.room !== id || m.from === uid) return;
+        if (m.t === '__hb') { const had = peers.has(m.from); peers.set(m.from, Date.now()); if (!had) emit(); return; }
+        if (m.t === '__bye') { peers.delete(m.from); emit(); return; }
+        (handlers[m.t] || []).forEach(f => f(m.d));
+      };
+      listeners.add(onMsg);
+      const beat = () => post({ k: 'room', room: id, from: uid, t: '__hb' });
+      beat();
+      const hb = setInterval(() => {
+        beat(); const now = Date.now(); let ch = false;
+        for (const [k, v] of peers) if (now - v > 4000) { peers.delete(k); ch = true; }
+        if (ch) emit();
+      }, 1000);
+      return {
+        ready: Promise.resolve(),
+        send: (t, d) => post({ k: 'room', room: id, from: uid, t, d }),
+        on: (t, f) => (handlers[t] ||= []).push(f),
+        onPresence: f => { presCb = f; emit(); },
+        leave() { post({ k: 'room', room: id, from: uid, t: '__bye' }); clearInterval(hb); listeners.delete(onMsg); },
+      };
+    },
+    async report(B, self, opp) {
+      const r = reg(), me = r[myId];
+      const meIsA = B.role === 'a';
+      const sa = meIsA ? self : opp, sb2 = meIsA ? opp : self;
+      const aWins = sa >= sb2, iWin = meIsA ? aWins : !aWins;
+      const meBefore = B.meBefore, oppBefore = B.opp.elo;
+      const ew = iWin ? meBefore : oppBefore, el = iWin ? oppBefore : meBefore;
+      const d = Math.max(8, Math.round(32 * (1 - 1 / (1 + Math.pow(10, (el - ew) / 400)))));
+      let meAfter = meBefore, oppAfter = oppBefore;
+      if (B.ranked) {
+        meAfter = iWin ? meBefore + d : Math.max(100, meBefore - d);
+        oppAfter = iWin ? Math.max(100, oppBefore - d) : oppBefore + d;
+        me.elo = meAfter; me.peak_elo = Math.max(me.peak_elo, meAfter);
+        if (iWin) { me.wins++; me.streak++; me.best_streak = Math.max(me.best_streak, me.streak); }
+        else { me.losses++; me.streak = 0; }
+        saveReg(r);
+      }
+      const pa = meIsA ? me : B.opp, pb = meIsA ? B.opp : me;
+      const m = {
+        id: B.id, player_a: pa.id, player_b: pb.id, ranked: B.ranked, status: 'judged',
+        score_a: +sa.toFixed(2), score_b: +sb2.toFixed(2), winner: aWins ? pa.id : pb.id,
+        elo_a_before: meIsA ? meBefore : oppBefore, elo_b_before: meIsA ? oppBefore : meBefore,
+        elo_a_after: meIsA ? meAfter : oppAfter, elo_b_after: meIsA ? oppAfter : meAfter,
+        judged_at: new Date().toISOString(), a: lite(pa), b: lite(pb),
+      };
+      saveMatch(m); post({ k: 'feed' });
+      return m;
+    },
+    async cancelMatch() {},
+    async leaderboard(f) {
+      return Object.values(reg()).map(pub).filter(p => f === 'all' || p.faculty === f).sort((a, b) => b.elo - a.elo).slice(0, 50);
+    },
+    async history(uid) { return getMatches().filter(m => m.player_a === uid || m.player_b === uid).slice(0, 30); },
+    async feed() { return getMatches().slice(0, 12); },
+    onFeed(cb) { listeners.add(m => { if (m.k === 'feed') cb(); }); },
+  };
+}
+const Net = USE_SB ? SupaNet() : DemoNet();
+
+/* =================== camera =================== */
+let camStream = null;
+async function ensureCamera() {
+  if (camStream && camStream.getVideoTracks()[0]?.readyState === 'live') return camStream;
+  const v = { facingMode: 'user', width: { ideal: 960 }, height: { ideal: 720 } };
+  try { camStream = await navigator.mediaDevices.getUserMedia({ video: v, audio: { echoCancellation: true, noiseSuppression: true } }); }
+  catch (e) { camStream = await navigator.mediaDevices.getUserMedia({ video: v, audio: false }); }
+  updateChecks();
+  return camStream;
+}
+
+/* =================== face landmarks (MediaPipe) =================== */
+let landmarker = null, lmPromise = null;
+function loadLandmarker() {
+  if (lmPromise) return lmPromise;
+  S.model = 'loading'; updateChecks();
+  lmPromise = (async () => {
+    const V = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+    const vision = await import(V + '/vision_bundle.mjs');
+    const files = await vision.FilesetResolver.forVisionTasks(V + '/wasm');
+    const opts = d => ({ baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task', delegate: d }, runningMode: 'IMAGE', numFaces: 1 });
+    try { landmarker = await vision.FaceLandmarker.createFromOptions(files, opts('GPU')); }
+    catch (e) { landmarker = await vision.FaceLandmarker.createFromOptions(files, opts('CPU')); }
+    S.model = 'ok'; updateChecks();
+    return landmarker;
+  })().catch(e => { console.error(e); S.model = 'err'; updateChecks(); lmPromise = null; throw e; });
+  return lmPromise;
+}
+
+const FACE_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109, 10];
+const MIDLINE = [10, 151, 9, 8, 168, 6, 197, 195, 5, 4, 1, 2, 164, 0, 17, 18, 200, 199, 175, 152];
+const CATS = [
+  { k: 'sym', n: 'Симметрия', w: .22 },
+  { k: 'jaw', n: 'Челюсть', w: .18 },
+  { k: 'eyes', n: 'Глаза', w: .18 },
+  { k: 'thirds', n: 'Трети лица', w: .16 },
+  { k: 'phi', n: 'Золотое сечение', w: .14 },
+  { k: 'gaze', n: 'Взгляд и ракурс', w: .12 },
+];
+
+/* Метрики по мотивам attractivenesstest.com / Rate My Face: симметрия, пропорции φ, трети, челюсть, кантальный наклон, взгляд */
+function scoreFace(L, w, h) {
+  const raw = i => ({ x: L[i].x * w, y: L[i].y * h });
+  const d = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+  const le = mid(raw(33), raw(133)), re = mid(raw(263), raw(362));
+  const roll = Math.atan2(re.y - le.y, re.x - le.x);
+  const c = raw(168), cs = Math.cos(-roll), sn = Math.sin(-roll);
+  const P = i => { const p = raw(i), x = p.x - c.x, y = p.y - c.y; return { x: x * cs - y * sn + c.x, y: x * sn + y * cs + c.y }; };
+  const g = (x, ideal, sigma) => 3 + 7 * Math.exp(-0.5 * ((x - ideal) / sigma) ** 2);
+  const ang = (a, b, c2) => { const v1 = { x: a.x - b.x, y: a.y - b.y }, v2 = { x: c2.x - b.x, y: c2.y - b.y }; return Math.acos(clamp((v1.x * v2.x + v1.y * v2.y) / (Math.hypot(v1.x, v1.y) * Math.hypot(v2.x, v2.y)), -1, 1)) * 180 / Math.PI; };
+  const faceW = d(P(234), P(454));
+
+  const mx = (P(10).x + P(168).x + P(1).x + P(152).x) / 4;
+  const pairs = [[33, 263], [133, 362], [159, 386], [145, 374], [70, 300], [105, 334], [107, 336], [61, 291], [234, 454], [172, 397], [58, 288], [132, 361], [50, 280], [129, 358], [93, 323]];
+  let asym = 0;
+  for (const [a, b] of pairs) { const A = P(a), B = P(b); asym += Math.abs((mx - A.x) - (B.x - mx)) + Math.abs(A.y - B.y); }
+  asym = asym / pairs.length / faceW;
+  const sym = g(asym, 0, 0.05);
+
+  const gon = (ang(P(234), P(172), P(152)) + ang(P(454), P(397), P(152))) / 2;
+  const jaw = g(gon, 128, 14) * .6 + g(d(P(172), P(397)) / faceW, .8, .1) * .4;
+
+  const tilt = (inn, out) => { const I = P(inn), O = P(out); return Math.atan2(I.y - O.y, Math.abs(O.x - I.x)) * 180 / Math.PI; };
+  const ct = (tilt(133, 33) + tilt(362, 263)) / 2;
+  const ew = (d(P(33), P(133)) + d(P(362), P(263))) / 2, ic = d(P(133), P(362));
+  const eyes = g(ct, 6, 6) * .6 + g(ic / ew, 1, .22) * .4;
+
+  const browY = (P(105).y + P(334).y) / 2, subY = P(2).y, chinY = P(152).y, stoY = (P(13).y + P(14).y) / 2;
+  const thirds = g((subY - browY) / (chinY - subY), 1, .18) * .6 + g((stoY - subY) / (chinY - stoY), .5, .15) * .4;
+
+  const faceLen = (chinY - browY) * 1.5;
+  const phi = g(faceLen / faceW, 1.36, .16) * .5 + g(d(P(61), P(291)) / d(P(64), P(294)), 1.55, .25) * .5;
+
+  const yaw = (P(1).x - (P(234).x + P(454).x) / 2) / faceW;
+  let gz = .5;
+  if (L.length > 477) {
+    const eyesDef = [[133, 33], [362, 263]];
+    const pos = irisIdx => {
+      const R = P(irisIdx);
+      const [inn, out] = eyesDef.sort((e1, e2) => d(R, mid(P(e1[0]), P(e1[1]))) - d(R, mid(P(e2[0]), P(e2[1]))))[0];
+      const I = P(inn), O = P(out); return (R.x - I.x) / (O.x - I.x);
+    };
+    gz = (pos(468) + pos(473)) / 2;
+  }
+  const gaze = g(Math.abs(yaw), 0, .06) * .6 + g(Math.abs(gz - .5), 0, .12) * .4;
+
+  const cats = { sym, jaw, eyes, thirds, phi, gaze };
+  for (const k in cats) cats[k] = +clamp(cats[k], 1, 10).toFixed(1);
+  const score = +CATS.reduce((s, c) => s + cats[c.k] * c.w, 0).toFixed(2);
+  return { score, cats };
+}
+
+function analyze(c) {
+  const zero = { score: 0, cats: Object.fromEntries(CATS.map(x => [x.k, 0])), noFace: true, lm: null };
+  if (!c || !landmarker) return zero;
+  let r; try { r = landmarker.detect(c); } catch (e) { console.error(e); return zero; }
+  const L = r?.faceLandmarks?.[0];
+  if (!L) return zero;
+  return { ...scoreFace(L, c.width, c.height), noFace: false, lm: L.map(p => [+p.x.toFixed(4), +p.y.toFixed(4)]) };
+}
+function grab(video, maxW = 960) {
+  if (!video || !video.videoWidth) return null;
+  const k = Math.min(1, maxW / video.videoWidth);
+  const c = document.createElement('canvas');
+  c.width = Math.round(video.videoWidth * k); c.height = Math.round(video.videoHeight * k);
+  c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
+  return c;
+}
+function toJpeg(c, maxW = 420) {
+  if (!c) return null;
+  const k = Math.min(1, maxW / c.width), o = document.createElement('canvas');
+  o.width = Math.round(c.width * k); o.height = Math.round(c.height * k);
+  o.getContext('2d').drawImage(c, 0, 0, o.width, o.height);
+  return o.toDataURL('image/jpeg', .72);
+}
+
+function drawGuides(x, P, W, p) {
+  x.save(); x.lineWidth = Math.max(1, W / 280);
+  const poly = (idx, frac) => { const n = Math.max(2, Math.floor(idx.length * frac)); x.beginPath(); idx.slice(0, n).forEach((k, i) => { const [a, b] = P[k]; i ? x.lineTo(a, b) : x.moveTo(a, b); }); x.stroke(); };
+  x.strokeStyle = 'rgba(240,86,80,.9)'; poly(FACE_OVAL, p);
+  x.setLineDash([W / 80, W / 120]); x.strokeStyle = 'rgba(247,236,233,.65)'; poly(MIDLINE, p);
+  const xs = FACE_OVAL.map(k => P[k][0]), L0 = Math.min(...xs) - W * .04, R0 = Math.max(...xs) + W * .04;
+  [(P[105][1] + P[334][1]) / 2, P[2][1], P[152][1]].forEach(y => { x.beginPath(); x.moveTo(L0, y); x.lineTo(L0 + (R0 - L0) * p, y); x.stroke(); });
+  x.setLineDash([]); x.strokeStyle = 'rgba(240,86,80,.95)';
+  [[133, 33], [362, 263], [61, 291], [172, 152], [397, 152]].forEach(([a, b]) => { x.beginPath(); x.moveTo(P[a][0], P[a][1]); x.lineTo(P[a][0] + (P[b][0] - P[a][0]) * p, P[a][1] + (P[b][1] - P[a][1]) * p); x.stroke(); });
+  x.fillStyle = 'rgba(240,86,80,1)';
+  [33, 133, 362, 263, 1, 2, 152, 172, 397, 61, 291, 10].forEach(k => { x.beginPath(); x.arc(P[k][0], P[k][1], Math.max(2, W / 140) * p, 0, 7); x.fill(); });
+  x.restore();
+}
+function drawShot(cv, src, lm, onDone) {
+  if (!cv || !src) { onDone?.(); return; }
+  const img = new Image();
+  img.onload = () => {
+    cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+    const x = cv.getContext('2d'), W = cv.width, H = cv.height;
+    const pts = lm ? lm.map(([a, b]) => [a * W, b * H]) : [];
+    const t0 = performance.now(), D = 1800, r = Math.max(1.4, W / 300);
+    const f = now => {
+      const t = Math.min(1, (now - t0) / D), e = 1 - Math.pow(1 - t, 3), sy = e * H * 1.05;
+      x.drawImage(img, 0, 0, W, H);
+      x.fillStyle = 'rgba(22,14,14,.3)'; x.fillRect(0, 0, W, H);
+      x.fillStyle = 'rgba(247,236,233,.85)';
+      for (let i = 0; i < pts.length; i += 2) { const [px, py] = pts[i]; if (py < sy) x.fillRect(px - r / 2, py - r / 2, r, r); }
+      if (t < 1) {
+        const gr = x.createLinearGradient(0, sy - H * .12, 0, sy);
+        gr.addColorStop(0, 'rgba(226,64,63,0)'); gr.addColorStop(1, 'rgba(226,64,63,.38)');
+        x.fillStyle = gr; x.fillRect(0, sy - H * .12, W, H * .12);
+        x.fillStyle = 'rgba(255,110,100,.95)'; x.fillRect(0, sy - 1, W, 2);
+      }
+      if (pts.length && t > .5) drawGuides(x, pts, W, Math.min(1, (t - .5) / .5));
+      if (t < 1) requestAnimationFrame(f); else onDone?.();
+    };
+    requestAnimationFrame(f);
+  };
+  img.onerror = () => onDone?.();
+  img.src = src;
+}
+
+/* =================== auth =================== */
+function renderAuth(mode = 'login') {
+  document.body.classList.remove('nav-locked');
+  $('#app').innerHTML = `
+  <div class="auth">
+    <section class="auth-poster">
+      <div class="poster-grid"></div>
+      <div class="brand"><span class="brand-mark"></span>MOGGED<span class="brand-sub">Арена</span></div>
+      <h2 class="poster-title"><span>Лицом</span><span class="outline">к лицу</span><span>за ELO</span></h2>
+      <div class="poster-rules">
+        <div><b>${CONFIG.BATTLE_SECONDS} с</b><span>таймер боя</span></div>
+        <div><b>±${CONFIG.ELO_RANGE}</b><span>разброс ELO</span></div>
+        <div><b>6</b><span>метрик лица</span></div>
+      </div>
+    </section>
+    <section class="auth-form-wrap">
+      <form class="auth-form" id="authForm" novalidate>
+        <div class="seg auth-tabs" role="tablist">
+          <button type="button" data-mode="login" aria-pressed="${mode === 'login'}">Вход</button>
+          <button type="button" data-mode="reg" aria-pressed="${mode === 'reg'}">Регистрация</button>
         </div>
-
-        <!-- Шаг 2: Экран ожидания -->
-        <div id="waiting-screen" class="hidden py-8">
-            <div class="inline-block w-8 h-8 border-4 border-red-600 border-t-transparent rounded-full animate-spin mb-4"></div>
-            <p id="status-text" class="text-neutral-300 font-medium">Ищем достойного соперника...</p>
+        <div>
+          <h1>${mode === 'login' ? 'С возвращением' : 'Новый боец'}</h1>
+          <p class="lead">${mode === 'login' ? 'Арена ждёт. Твоё ELO тоже.' : 'Профиль и факультет. Остальное решит разметка лица.'}</p>
         </div>
-
-        <!-- Шаг 3: Экран результатов -->
-        <div id="result-screen" class="hidden space-y-4">
-            <h2 id="match-result-title" class="text-4xl font-black tracking-wide"></h2>
-            <div class="flex justify-around bg-neutral-950 p-4 rounded-xl border border-neutral-800">
-                <div>
-                    <p class="text-xs text-neutral-500">Твой балл</p>
-                    <p id="my-score" class="text-2xl font-bold text-red-500">-</p>
-                </div>
-                <div class="border-r border-neutral-800"></div>
-                <div>
-                    <p class="text-xs text-neutral-500">Балл соперника</p>
-                    <p id="opp-score" class="text-2xl font-bold text-neutral-300">-</p>
-                </div>
-            </div>
-            <button onclick="location.reload()" class="w-full bg-neutral-800 hover:bg-neutral-700 font-medium py-3 rounded-xl transition">
-                ИГРАТЬ ЕЩЕ РАЗ
-            </button>
+        <div class="reg-only" ${mode === 'reg' ? '' : 'hidden'}>
+          <div class="row2">
+            <div class="field"><label for="fName">Имя</label><input class="input" id="fName" maxlength="32" autocomplete="name" placeholder="Айдана"></div>
+            <div class="field"><label for="fUser">Юзернейм</label><input class="input" id="fUser" maxlength="20" autocomplete="username" placeholder="aidana_k"></div>
+          </div>
         </div>
+        <div class="reg-only field" ${mode === 'reg' ? '' : 'hidden'}>
+          <label for="fFac">Факультет</label>
+          <select class="select" id="fFac"><option value="">Выбери факультет</option>${FACULTIES.map(f => `<option value="${f.id}">${f.name}</option>`).join('')}</select>
+        </div>
+        <div class="field"><label for="fEmail">Почта</label><input class="input" id="fEmail" type="email" autocomplete="email" placeholder="you@narxoz.kz"></div>
+        <div class="field"><label for="fPass">Пароль</label><input class="input" id="fPass" type="password" autocomplete="${mode === 'login' ? 'current-password' : 'new-password'}" placeholder="минимум 6 символов"></div>
+        <p class="err" id="authErr"></p>
+        <button class="btn primary" id="authBtn">${mode === 'login' ? 'Войти' : 'Создать профиль'}<i data-lucide="arrow-right"></i></button>
+        ${USE_SB ? '' : '<p class="auth-note">Демо-режим: данные в этом браузере. Для боя открой вторую вкладку и зарегистрируй второго игрока. Для продакшена впиши ключи Supabase в CONFIG.</p>'}
+      </form>
+    </section>
+  </div>`;
+  icons();
+  $$('[data-mode]').forEach(b => b.onclick = () => renderAuth(b.dataset.mode));
+  $('#authForm').onsubmit = async e => {
+    e.preventDefault();
+    const err = $('#authErr'), btn = $('#authBtn'); err.textContent = '';
+    $$('.input,.select').forEach(i => i.removeAttribute('aria-invalid'));
+    const email = $('#fEmail').value.trim(), pass = $('#fPass').value;
+    const bad = (id, msg) => { $(id).setAttribute('aria-invalid', 'true'); err.textContent = msg; $(id).focus(); };
+    if (mode === 'reg') {
+      const name = $('#fName').value.trim(), user = $('#fUser').value.trim(), f = $('#fFac').value;
+      if (name.length < 2) return bad('#fName', 'Имя: от 2 символов');
+      if (!/^[a-zA-Z0-9_.]{3,20}$/.test(user)) return bad('#fUser', 'Юзернейм: 3-20 символов, латиница, цифры, _ и .');
+      if (!f) return bad('#fFac', 'Выбери факультет');
+      if (!/^\S+@\S+\.\S+$/.test(email)) return bad('#fEmail', 'Проверь почту');
+      if (pass.length < 6) return bad('#fPass', 'Пароль: минимум 6 символов');
+      btn.classList.add('is-loading');
+      try {
+        const r = await Net.signUp(email, pass, { display_name: name, username: user, faculty: f });
+        if (r.confirm) { btn.classList.remove('is-loading'); err.style.color = 'var(--ok)'; err.textContent = 'Проверь почту и подтверди аккаунт, потом войди.'; return; }
+        boot();
+      } catch (ex) { btn.classList.remove('is-loading'); err.textContent = ex.message; }
+    } else {
+      if (!/^\S+@\S+\.\S+$/.test(email)) return bad('#fEmail', 'Проверь почту');
+      if (!pass) return bad('#fPass', 'Введи пароль');
+      btn.classList.add('is-loading');
+      try { await Net.signIn(email, pass); boot(); }
+      catch (ex) { btn.classList.remove('is-loading'); err.textContent = ex.message; }
+    }
+  };
+}
+
+/* =================== shell =================== */
+function renderShell() {
+  $('#app').innerHTML = `
+  <header class="top">
+    <div class="brand"><span class="brand-mark"></span>MOGGED<span class="brand-sub">Арена</span></div>
+    <nav class="nav" aria-label="Разделы">
+      <a data-go="arena"><i data-lucide="swords" class="ni"></i><span>Арена</span><span class="kbd">1</span></a>
+      <a data-go="board"><i data-lucide="trophy" class="ni"></i><span>Рейтинг</span><span class="kbd">2</span></a>
+      <a data-go="history"><i data-lucide="history" class="ni"></i><span>История</span><span class="kbd">3</span></a>
+      <a data-go="profile"><i data-lucide="user-round" class="ni"></i><span>Профиль</span><span class="kbd">4</span></a>
+    </nav>
+    <div class="top-r">
+      <button class="icon-btn" id="muteBtn" aria-label="Звук"></button>
+      <button class="me-chip" id="meChip" data-go="profile"></button>
     </div>
+  </header>
+  <main id="main"></main>
+  ${USE_SB ? '' : '<div class="demo-flag">Демо · данные в браузере</div>'}`;
+  $$('[data-go]').forEach(a => a.addEventListener('click', () => { SFX.click(); go(a.dataset.go); }));
+  $('#muteBtn').onclick = () => { S.muted = !S.muted; localStorage.setItem('mog_muted', S.muted ? '1' : '0'); renderMute(); if (!S.muted) SFX.click(); };
+  renderMute(); updateMe();
+}
+function renderMute() { const b = $('#muteBtn'); if (!b) return; b.innerHTML = `<i data-lucide="${S.muted ? 'volume-x' : 'volume-2'}"></i>`; icons(); }
+function updateMe(bump = false) {
+  const c = $('#meChip'); if (!c) return;
+  const p = S.profile;
+  if (!p) { c.innerHTML = `<span class="tier">Новый профиль</span>${ava(null)}`; return; }
+  c.innerHTML = `<span class="elo${bump ? ' bump' : ''}">${p.elo}</span><span class="tier">${tierOf(p.elo).name}</span>${ava(p)}`;
+}
+function lockNav(on) { document.body.classList.toggle('nav-locked', on); }
+function setNavOn(v) { $$('.nav a').forEach(a => a.classList.toggle('on', a.dataset.go === v)); }
 
-    <script>
-        let selectedFile = null;
+function go(v) {
+  if (S.battle && !S.battle.finished && v !== 'battle') { toast('Сначала выйди из комнаты'); return; }
+  if (!S.profile && v !== 'profile') return;
+  if (S.search && v !== 'arena') cancelSearch();
+  if (S.lastRoom && v !== 'result') { const r = S.lastRoom; S.lastRoom = null; setTimeout(() => r.leave(), 100); }
+  S.view = v;
+  setNavOn(v === 'battle' ? 'arena' : v);
+  ({ arena: viewArena, board: viewBoard, history: viewHistory, profile: viewProfile })[v]?.();
+  icons();
+  scrollTo({ top: 0 });
+}
 
-        document.getElementById('photo-input').addEventListener('change', (e) => {
-            selectedFile = e.target.files[0];
-            if (selectedFile) {
-                document.getElementById('file-label').innerText = "Фото выбрано: " + selectedFile.name;
-            }
-        });
+/* =================== arena =================== */
+function viewArena() {
+  const p = S.profile, t = tierOf(p.elo), total = p.wins + p.losses;
+  $('#main').innerHTML = `
+  <div class="arena view">
+    <aside class="you">
+      <div class="cam-slot" id="camSlot">
+        <video id="camPrev" autoplay muted playsinline></video>
+        <canvas id="camFx"></canvas>
+        <span class="viewfinder"></span>
+        <button class="empty" id="camOn" type="button"><i data-lucide="camera"></i><b>Включить камеру</b><span>Фото не нужно: бой идёт вживую по видео</span></button>
+        <span class="cam-state" id="camState">Ищем лицо</span>
+      </div>
+      <div class="you-name"><h3>${esc(p.display_name)}</h3><span class="mono">${p.elo}</span></div>
+      <p class="you-meta">@${esc(p.username)} · ${fac(p.faculty).name}</p>
+      ${tagsHTML(p.tags)}
+      <div class="tierbar">
+        <div class="lbl"><b>${t.name}</b><span>${t.next ? `до «${t.next.n}» ${t.next.min - p.elo}` : 'вершина'}</span></div>
+        <div class="track"><i id="tierFill"></i></div>
+      </div>
+      <ul class="checks" id="checks"></ul>
+    </aside>
 
-        async function startBattle() {
-            const userId = document.getElementById('user-id').value.trim();
-            if (!userId || !selectedFile) {
-                alert("Пожалуйста, введите ник и выберите фотографию!");
-                return;
-            }
+    <section class="arena-center">
+      <div class="arena-head">
+        <div><p class="eyebrow">Матчмейкинг</p><h1 class="h-page">Найти соперника</h1></div>
+        <div class="controls">
+          <div class="seg" id="scopeSeg">
+            <button data-scope="all" aria-pressed="${S.scope === 'all'}">Все факультеты</button>
+            <button data-scope="faculty" aria-pressed="${S.scope === 'faculty'}">Мой факультет</button>
+          </div>
+          <div class="seg" id="rankSeg">
+            <button data-ranked="1" aria-pressed="${S.ranked}">Рейтинг</button>
+            <button data-ranked="0" aria-pressed="${!S.ranked}">Тренировка</button>
+          </div>
+        </div>
+      </div>
+      <div id="launchWrap"></div>
+      <div class="stats-strip">
+        <div><b>${p.wins}<span class="muted">/</span>${p.losses}</b><small>победы / поражения</small></div>
+        <div><b>${total ? Math.round(p.wins / total * 100) : 0}%</b><small>винрейт</small></div>
+        <div><b>${p.streak}${p.streak >= 2 ? '<i data-lucide="flame" class="flame"></i>' : ''}</b><small>серия побед</small></div>
+        <div><b>${p.peak_elo}</b><small>пик ELO</small></div>
+      </div>
+    </section>
 
-            // Переключаем экраны
-            document.getElementById('setup-screen').classList.add('hidden');
-            document.getElementById('waiting-screen').classList.remove('hidden');
+    <aside class="feed">
+      <div class="feed-head"><span class="eyebrow">Лента боёв</span><span class="live">live</span></div>
+      <div class="feed-online"><b id="onlineN">${S.online}</b><span>онлайн<br>сейчас</span></div>
+      <ol id="feedList"></ol>
+    </aside>
+  </div>`;
+  requestAnimationFrame(() => { const f = $('#tierFill'); if (f) f.style.transform = `scaleX(${t.pct})`; });
+  $$('[data-scope]').forEach(b => b.onclick = () => { if (S.search) return; S.scope = b.dataset.scope; localStorage.setItem('mog_scope', S.scope); $$('[data-scope]').forEach(x => x.setAttribute('aria-pressed', x === b)); SFX.click(); renderLaunch(); });
+  $$('[data-ranked]').forEach(b => b.onclick = () => { if (S.search) return; S.ranked = b.dataset.ranked === '1'; localStorage.setItem('mog_ranked', S.ranked ? '1' : '0'); $$('[data-ranked]').forEach(x => x.setAttribute('aria-pressed', x === b)); SFX.click(); renderLaunch(); });
+  $('#camOn').onclick = async () => { try { await ensureCamera(); attachPreview(); } catch (e) { toast('Разреши доступ к камере в настройках браузера', 'hot', 'camera-off'); } };
+  renderLaunch(); renderFeed(); updateChecks();
+  if (camStream) attachPreview();
+  else navigator.permissions?.query({ name: 'camera' }).then(r => { if (r.state === 'granted') ensureCamera().then(attachPreview).catch(() => {}); }).catch(() => {});
+}
 
-            // Открываем WebSocket соединение с локальным бэкендом
-            const ws = new WebSocket(`ws://127.0.0.1:8000/ws/battle/${userId}`);
+let previewTimer = null;
+function attachPreview() {
+  const v = $('#camPrev'); if (!v || !camStream) return;
+  v.srcObject = camStream; v.play().catch(() => {});
+  $('#camSlot').classList.add('on');
+  updateChecks(); loadLandmarker().catch(() => {});
+  clearTimeout(previewTimer);
+  const small = document.createElement('canvas');
+  const step = () => {
+    const c = $('#camFx');
+    if (S.view !== 'arena' || !c || !document.body.contains(v)) return;
+    if (landmarker && v.videoWidth) {
+      const W = 256, H = Math.round(256 * v.videoHeight / v.videoWidth);
+      small.width = W; small.height = H; small.getContext('2d').drawImage(v, 0, 0, W, H);
+      let L = null; try { L = landmarker.detect(small)?.faceLandmarks?.[0]; } catch (e) {}
+      if (c.width !== v.videoWidth) { c.width = v.videoWidth; c.height = v.videoHeight; }
+      const x = c.getContext('2d'); x.clearRect(0, 0, c.width, c.height);
+      if (L) { x.fillStyle = 'rgba(247,236,233,.75)'; for (let i = 0; i < L.length; i += 3) x.fillRect(L[i].x * c.width - 1.5, L[i].y * c.height - 1.5, 3, 3); }
+      setFace(!!L);
+    }
+    previewTimer = setTimeout(step, 420);
+  };
+  step();
+}
+function setFace(ok) {
+  $('#camSlot')?.classList.toggle('face-ok', ok);
+  const st = $('#camState'); if (st) st.textContent = ok ? 'Лицо в кадре' : 'Ищем лицо';
+  if (S.faceOk !== ok) { S.faceOk = ok; updateChecks(); }
+}
+function updateChecks() {
+  const el = $('#checks'); if (!el) return;
+  const items = [
+    [!!camStream, 'Камера', camStream ? 'включена' : 'нужна'],
+    [S.faceOk, 'Лицо в кадре', S.faceOk ? 'есть' : 'не видно'],
+    [S.model === 'ok', 'Разметка лица', { ok: 'готова', loading: 'грузится', err: 'ошибка' }[S.model] || 'ждёт'],
+    [!!(S.profile?.avatar_url && S.profile?.tags?.length), 'Аватар и теги', 'по желанию'],
+  ];
+  el.innerHTML = items.map(([ok, n, s]) => `<li class="${ok ? 'ok' : 'bad'}"><i data-lucide="${ok ? 'check' : 'circle-dashed'}"></i><span>${n}</span><small>${s}</small></li>`).join('');
+  icons();
+}
 
-            ws.onopen = async () => {
-                // Конвертируем файл в байты и отправляем на сервер
-                const arrayBuffer = await selectedFile.arrayBuffer();
-                ws.send(arrayBuffer);
-            };
+const REEL = ['Сканируем арену', `±${CONFIG.ELO_RANGE} ELO`, 'Цифровые технологии', 'Медицина', 'Госуправление', 'Гуманитарии', 'Бизнес и маркетинг'];
+function renderLaunch() {
+  const w = $('#launchWrap'); if (!w) return;
+  const p = S.profile, lo = p.elo - CONFIG.ELO_RANGE, hi = p.elo + CONFIG.ELO_RANGE;
+  const scopeTxt = S.scope === 'faculty' ? fac(p.faculty).short : 'все факультеты';
+  if (!S.search) {
+    w.innerHTML = `
+    <button class="launch" id="launchBtn">
+      <span class="launch-lines"></span>
+      <i data-lucide="arrow-up-right" class="launch-arrow"></i>
+      <span class="launch-eyebrow">${S.ranked ? 'Рейтинговый бой' : 'Тренировка без ELO'} · ${scopeTxt}</span>
+      <span class="launch-title">В бой<br>лицом</span>
+      <span class="launch-foot"><span>Соперник строго <b>${lo}-${hi}</b> ELO</span><span class="kbd">Enter</span></span>
+    </button>`;
+    const b = $('#launchBtn');
+    b.onclick = startSearch;
+    b.onmousemove = e => { const r = b.getBoundingClientRect(); b.style.setProperty('--mx', (e.clientX - r.left) + 'px'); b.style.setProperty('--my', (e.clientY - r.top) + 'px'); };
+  } else if (S.search.state === 'searching') {
+    w.innerHTML = `
+    <div class="launch is-searching">
+      <span class="scan-bars"></span><span class="radar"></span>
+      <span class="launch-eyebrow" style="color:var(--tx3)">Поиск соперника · ${scopeTxt}</span>
+      <div class="reel" id="reel"><span>${REEL[0]}</span></div>
+      <div class="search-meta">
+        <div><span class="big mono" id="sTime">0:00</span><small>в очереди</small></div>
+        <div><b>${lo}-${hi}</b><small>окно ELO</small></div>
+        <div><b id="sOnline">${S.online}</b><small>онлайн</small></div>
+      </div>
+      <div class="launch-actions"><span class="muted" style="font-size:.85rem">Бой начнётся, только когда соперник зайдёт в комнату</span><button class="btn sm" id="cancelBtn">Отменить <span class="kbd">Esc</span></button></div>
+    </div>`;
+    $('#cancelBtn').onclick = cancelSearch;
+  } else {
+    const o = S.search.match.opp;
+    w.innerHTML = `
+    <div class="launch is-found">
+      <span class="launch-eyebrow" style="color:var(--red-hi)">Соперник найден</span>
+      <div class="found-wrap">${ava(o, 'xl')}<div><span class="launch-title found-name">${esc(o.display_name)}</span><span class="found-meta">${fac(o.faculty).name} · <b class="mono">${o.elo}</b> ELO · ${tierOf(o.elo).name}</span>${tagsHTML(o.tags, 4)}</div></div>
+      <div class="found-bar"><i></i></div>
+      <div class="launch-actions"><span class="muted" style="font-size:.85rem">Заходим в комнату</span></div>
+    </div>`;
+  }
+  icons();
+}
+function updateSearchMeta() {
+  if (!S.search) return;
+  const s = Math.floor((Date.now() - S.search.t0) / 1000), el = $('#sTime');
+  if (el) el.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  const on = $('#sOnline'); if (on) on.textContent = S.online;
+}
+async function startSearch() {
+  if (S.search || S.battle) return;
+  try { await ensureCamera(); attachPreview(); }
+  catch (e) { toast('Без камеры никак: разреши доступ в браузере', 'hot', 'camera-off'); return; }
+  loadLandmarker().catch(() => {});
+  const ac = new AbortController();
+  const me = S.search = { state: 'searching', t0: Date.now(), ac };
+  SFX.click(); renderLaunch();
+  let ri = 0;
+  const iv = setInterval(() => {
+    if (S.search !== me || me.state !== 'searching') return clearInterval(iv);
+    updateSearchMeta();
+    if ((Date.now() - me.t0) % 1400 < 500) { ri = (ri + 1) % REEL.length; const r = $('#reel'); if (r) r.innerHTML = `<span>${REEL[ri]}</span>`; }
+  }, 500);
+  try {
+    const m = await Net.findMatch({ scope: S.scope, ranked: S.ranked, elo: S.profile.elo, faculty: S.profile.faculty }, ac.signal);
+    if (!m || ac.signal.aborted || S.search !== me) return;
+    me.state = 'found'; me.match = m; SFX.found(); renderLaunch();
+    await sleep(1900);
+    if (S.search !== me) return;
+    S.search = null; enterBattle(m);
+  } catch (e) {
+    console.error(e); if (S.search === me) { S.search = null; renderLaunch(); }
+    toast('Поиск упал: ' + (e.message || e), 'hot');
+  }
+}
+function cancelSearch() { if (!S.search || S.search.state !== 'searching') return; S.search.ac.abort(); S.search = null; renderLaunch(); }
 
-            ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
+/* feed */
+async function loadFeed() { try { S.feed = await Net.feed(); renderFeed(); } catch (e) { console.error(e); } }
+function renderFeed() {
+  const ol = $('#feedList'); if (!ol) return;
+  if (!S.feed?.length) { ol.innerHTML = '<li class="quiet" style="border:0">Пока тихо. Сыграй первый бой, и он появится тут.</li>'; return; }
+  ol.innerHTML = S.feed.map((m, i) => {
+    const aWin = m.winner === m.player_a, W = aWin ? m.a : m.b, L = aWin ? m.b : m.a;
+    const ws = +(aWin ? m.score_a : m.score_b), ls = +(aWin ? m.score_b : m.score_a);
+    return `<li style="--i:${i}"><b>${esc(W?.display_name)}</b> замогал(а) <b>${esc(L?.display_name)}</b> <span class="v">${ws.toFixed(2)}:${ls.toFixed(2)}</span><span class="meta">${fac(W?.faculty).short} vs ${fac(L?.faculty).short} · ${timeAgo(m.judged_at)}</span></li>`;
+  }).join('');
+}
+function updateOnline() { const a = $('#onlineN'); if (a && a.textContent != S.online) { a.textContent = S.online; } const b = $('#sOnline'); if (b) b.textContent = S.online; }
 
-                if (data.status === "waiting") {
-                    document.getElementById('status-text').innerText = data.message;
-                } else if (data.status === "finished") {
-                    document.getElementById('waiting-screen').classList.add('hidden');
-                    document.getElementById('result-screen').classList.remove('hidden');
+/* =================== battle =================== */
+function cap(p, label) {
+  return `<figcaption>${ava(p)}<span class="who"><b>${esc(p.display_name)}</b><small>${label}</small></span><span class="elo-tag">${p.elo}</span></figcaption>`;
+}
+function viewBattle() {
+  const B = S.battle, me = S.profile, op = B.opp;
+  $('#main').innerHTML = `
+  <section class="battle view">
+    <div class="battle-top">
+      <div><p class="eyebrow">${B.ranked ? 'Рейтинговый бой' : 'Тренировка'} · комната ${esc(B.id.slice(0, 6))}</p>
+      <h1 class="h-page battle-h">${esc(me.display_name)} <span class="muted">vs</span> ${esc(op.display_name)}</h1></div>
+      <div class="room-status"><span class="dots" id="pDots"><i class="on"></i><i></i></span><span id="roomStatus">Ждём соперника · 1/2</span></div>
+    </div>
+    <div class="stage">
+      <figure class="tile me connected" id="tileMe"><video id="vMe" autoplay muted playsinline></video><span class="viewfinder"></span><span class="scan"></span><span class="flash"></span>${cap(me, 'Ты · ' + fac(me.faculty).short)}</figure>
+      <div class="mid">
+        <div class="ring idle" id="ring"><svg viewBox="0 0 120 120"><circle class="bg" cx="60" cy="60" r="54"/><circle class="fg" id="ringFg" cx="60" cy="60" r="54" stroke-dasharray="339.29" stroke-dashoffset="0" transform="rotate(-90 60 60)"/></svg><b id="tNum">1/2</b></div>
+        <p class="mid-label" id="midLabel">Бой начнётся, когда соперник зайдёт в комнату</p>
+      </div>
+      <figure class="tile opp" id="tileOpp"><video id="vOpp" autoplay playsinline></video><div class="tile-wait">${ava(op, 'xl')}<b>${esc(op.display_name)}</b><span id="oppWait">заходит в комнату…</span></div><span class="scan"></span><span class="flash"></span>${cap(op, fac(op.faculty).short)}</figure>
+    </div>
+    <div class="battle-foot">
+      <span class="tip"><i data-lucide="scan-face"></i>Лицо целиком в кадре, свет спереди, смотри в объектив</span>
+      <div class="controls"><button class="btn sm" id="micBtn"><i data-lucide="mic"></i>Микрофон</button><button class="btn ghost sm" id="leaveBtn">Выйти</button></div>
+    </div>
+  </section>`;
+}
+function renderRoomStatus(B) {
+  const st = $('#roomStatus'); if (!st) return;
+  const n = Math.min(2, B.present);
+  $$('#pDots i').forEach((d, i) => d.classList.toggle('on', i < n));
+  let txt, mid;
+  if (B.started) txt = 'Бой идёт';
+  else if (n < 2) { txt = 'Ждём соперника · 1/2'; mid = 'Бой начнётся, когда соперник зайдёт в комнату'; }
+  else if (!B.remoteOk) { txt = 'Оба здесь · соединяем видео'; mid = 'Соединяем видеочат…'; }
+  else { txt = 'Оба здесь · старт'; mid = 'Сейчас начнём'; }
+  st.textContent = txt;
+  if (!B.started) {
+    $('#tNum').textContent = n + '/2';
+    if (mid) $('#midLabel').textContent = mid;
+    const w = $('#oppWait'); if (w) w.textContent = n < 2 ? 'заходит в комнату…' : 'подключаем видео…';
+    $('#tileOpp')?.classList.toggle('joined', n >= 2);
+  }
+}
+function clearTimers(B) { B.timers.forEach(t => { clearTimeout(t); clearInterval(t); }); B.timers = []; }
 
-                    document.getElementById('my-score').innerText = data.your_score;
-                    document.getElementById('opp-score').innerText = data.opp_score;
+async function enterBattle(m) {
+  clearTimeout(previewTimer);
+  const B = S.battle = { ...m, meBefore: S.profile.elo, present: 1, remoteOk: false, oppReady: false, started: false, finished: false, timers: [], pendingIce: [], fallbackSet: false };
+  lockNav(true); S.view = 'battle'; setNavOn('arena');
+  viewBattle(); icons();
+  const vMe = $('#vMe'); vMe.srcObject = camStream; vMe.play().catch(() => {});
+  $('#leaveBtn').onclick = () => { toast('Ты вышел из комнаты'); abortBattle(B, false); };
+  $('#micBtn').onclick = () => {
+    const a = camStream?.getAudioTracks()[0]; if (!a) { toast('Микрофон недоступен'); return; }
+    a.enabled = !a.enabled;
+    $('#micBtn').innerHTML = `<i data-lucide="${a.enabled ? 'mic' : 'mic-off'}"></i>${a.enabled ? 'Микрофон' : 'Без звука'}`; icons();
+  };
+  const room = B.room = Net.room(m.id, S.user.id);
+  setupPeer(B);
+  room.onPresence(ids => onPresence(B, ids));
+  room.on('join', () => { if (B.role === 'a') makeOffer(B); else room.send('here', {}); });
+  room.on('here', () => { if (B.role === 'a') makeOffer(B); });
+  room.on('offer', d => onOffer(B, d));
+  room.on('answer', d => onAnswer(B, d));
+  room.on('ice', d => onIce(B, d));
+  room.on('ready', () => { B.oppReady = true; tryStart(B); });
+  room.on('go', () => { if (B.role === 'b') startCountdown(B); });
+  room.on('shot', d => { B.oppShot = d; maybeFinish(B); });
+  room.on('bye', () => oppLeft(B));
+  loadLandmarker().catch(() => {});
+  await room.ready;
+  if (S.battle !== B) return;
+  room.send('join', {});
+  B.timers.push(setTimeout(() => {
+    if (S.battle === B && B.present < 2 && !B.started) { toast('Соперник не зашёл в комнату. Ищем другого'); abortBattle(B, true); }
+  }, 30000));
+}
+function onPresence(B, ids) {
+  if (S.battle !== B) return;
+  const n = new Set(ids).size, had = B.present;
+  B.present = n; renderRoomStatus(B);
+  if (n >= 2 && had < 2) {
+    SFX.found();
+    B.room.send('join', {});
+    if (!B.fallbackSet) {
+      B.fallbackSet = true;
+      B.timers.push(setTimeout(() => {
+        if (S.battle === B && !B.started && B.present >= 2 && B.role === 'a') { B.room.send('go', { noVideo: true }); startCountdown(B); }
+      }, 15000));
+    }
+  }
+  if (n < 2 && had >= 2 && !B.finished && B.started) oppLeft(B);
+}
+function oppLeft(B) {
+  if (S.battle !== B || B.finished || B.oppShot) return;
+  toast('Соперник вышел из комнаты', '', 'door-open');
+  abortBattle(B, false);
+}
+function abortBattle(B, research) {
+  if (S.battle !== B) return;
+  clearTimers(B); B.finished = true;
+  try { B.room.send('bye', {}); } catch (e) {}
+  Net.cancelMatch(B.id).catch(() => {});
+  setTimeout(() => B.room.leave(), 300);
+  try { B.pc?.close(); } catch (e) {}
+  S.battle = null; lockNav(false); go('arena');
+  if (research) setTimeout(startSearch, 700);
+}
 
-                    const titleEl = document.getElementById('match-result-title');
-                    if (data.result === "WIN") {
-                        titleEl.innerText = "ПОБЕДА";
-                        titleEl.className = "text-4xl font-black tracking-wide text-green-500";
-                        // Запускаем победный салют из конфетти
-                        confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
-                    } else {
-                        titleEl.innerText = "ПОРАЖЕНИЕ";
-                        titleEl.className = "text-4xl font-black tracking-wide text-red-600";
-                    }
-                }
-            };
+/* WebRTC */
+function setupPeer(B) {
+  const pc = B.pc = new RTCPeerConnection({ iceServers: CONFIG.ICE });
+  camStream.getTracks().forEach(t => pc.addTrack(t, camStream));
+  pc.onicecandidate = e => { if (e.candidate) B.room.send('ice', e.candidate.toJSON()); };
+  pc.ontrack = e => {
+    const v = $('#vOpp'); if (!v || v.srcObject === e.streams[0]) return;
+    v.srcObject = e.streams[0];
+    v.onplaying = () => {
+      if (B.remoteOk || S.battle !== B) return;
+      B.remoteOk = true; $('#tileOpp')?.classList.add('connected');
+      B.room.send('ready', {}); renderRoomStatus(B); tryStart(B);
+    };
+    v.play().catch(() => { v.muted = true; v.play().catch(() => {}); });
+  };
+  pc.onconnectionstatechange = () => { if (pc.connectionState === 'failed' && !B.started) toast('Видео не соединилось. Бой всё равно начнётся'); };
+}
+async function flushIce(B) { for (const c of B.pendingIce.splice(0)) { try { await B.pc.addIceCandidate(c); } catch (e) {} } }
+async function makeOffer(B) {
+  const pc = B.pc; if (!pc || pc.remoteDescription) return;
+  try {
+    if (pc.signalingState === 'have-local-offer') { B.room.send('offer', pc.localDescription.toJSON()); return; }
+    if (B.makingOffer) return; B.makingOffer = true;
+    const o = await pc.createOffer(); await pc.setLocalDescription(o);
+    B.room.send('offer', pc.localDescription.toJSON());
+  } catch (e) { console.error(e); } finally { B.makingOffer = false; }
+}
+async function onOffer(B, d) {
+  const pc = B.pc; if (B.role !== 'b' || !pc) return;
+  try {
+    if (pc.remoteDescription) { if (pc.localDescription) B.room.send('answer', pc.localDescription.toJSON()); return; }
+    await pc.setRemoteDescription(d); await flushIce(B);
+    const a = await pc.createAnswer(); await pc.setLocalDescription(a);
+    B.room.send('answer', pc.localDescription.toJSON());
+  } catch (e) { console.error(e); }
+}
+async function onAnswer(B, d) {
+  const pc = B.pc; if (B.role !== 'a' || !pc || pc.signalingState !== 'have-local-offer') return;
+  try { await pc.setRemoteDescription(d); await flushIce(B); } catch (e) { console.error(e); }
+}
+async function onIce(B, d) {
+  const pc = B.pc; if (!pc) return;
+  if (pc.remoteDescription) { try { await pc.addIceCandidate(d); } catch (e) {} } else B.pendingIce.push(d);
+}
+function tryStart(B) {
+  if (B.role === 'a' && !B.started && B.present >= 2 && B.remoteOk && B.oppReady) { B.room.send('go', {}); startCountdown(B); }
+}
 
-            ws.onerror = () => {
-                alert("Ошибка соединения с сервером!");
-                location.reload();
-            };
-        }
-    </script>
+async function startCountdown(B) {
+  if (B.started || S.battle !== B) return;
+  B.started = true; renderRoomStatus(B);
+  const ring = $('#ring'), num = $('#tNum'), label = $('#midLabel'), fg = $('#ringFg');
+  const pop = () => { num.classList.remove('pop'); void num.offsetWidth; num.classList.add('pop'); };
+  ring.classList.remove('idle');
+  for (const n of [3, 2, 1]) {
+    if (S.battle !== B) return;
+    num.textContent = n; pop(); label.textContent = 'Приготовься'; SFX.count();
+    await sleep(800);
+  }
+  if (S.battle !== B) return;
+  SFX.go(); label.textContent = 'Смотри в камеру и держи лицо';
+  $('#tileMe').classList.add('hot'); $('#tileOpp').classList.add('hot');
+  const dur = CONFIG.BATTLE_SECONDS * 1000, t0 = Date.now(), C = 339.29;
+  let last = null;
+  await new Promise(res => {
+    const iv = setInterval(() => {
+      if (S.battle !== B) { clearInterval(iv); return res(); }
+      const el = Date.now() - t0, left = Math.max(0, dur - el), sec = Math.ceil(left / 1000);
+      fg.style.strokeDashoffset = (C * Math.min(1, el / dur)).toFixed(2);
+      if (sec !== last) {
+        last = sec; num.textContent = sec;
+        if (sec <= 3 && sec > 0) { ring.classList.add('hot'); pop(); SFX.tick(); label.textContent = 'Не моргай'; }
+      }
+      if (left <= 0) { clearInterval(iv); res(); }
+    }, 40);
+    B.timers.push(iv);
+  });
+  if (S.battle !== B) return;
+  capture(B);
+}
+
+async function capture(B) {
+  const tMe = $('#tileMe'), tOpp = $('#tileOpp'), ring = $('#ring');
+  [tMe, tOpp].forEach(t => { t.classList.remove('shot', 'hot'); void t.offsetWidth; t.classList.add('shot', 'analyzing'); });
+  ring.classList.remove('hot'); ring.classList.add('idle');
+  $('#tNum').textContent = 'AI'; $('#midLabel').textContent = 'Снимок сделан. Размечаем лица…';
+  SFX.shutter();
+  const local = grab($('#vMe')), remote = B.remoteOk ? grab($('#vOpp')) : null;
+  try { await withTimeout(loadLandmarker(), 25000); } catch (e) { toast('Модель разметки не загрузилась', 'hot'); }
+  if (S.battle !== B) return;
+  const mine = analyze(local);
+  const shot = { score: mine.score, cats: mine.cats, noFace: mine.noFace, lm: mine.lm, img: toJpeg(local) };
+  B.room.send('shot', shot);
+  B.myShot = shot;
+  if (remote) { const w = analyze(remote); B.witness = { ...w, img: toJpeg(remote) }; }
+  B.timers.push(setTimeout(() => {
+    if (S.battle !== B || B.finished || B.oppShot) return;
+    if (B.witness && !B.witness.noFace) { B.oppShot = { ...B.witness, fromWitness: true }; maybeFinish(B); }
+    else { toast('Не получили снимок соперника. Матч отменён'); abortBattle(B, false); }
+  }, 15000));
+  maybeFinish(B);
+}
+
+async function maybeFinish(B) {
+  if (B.finished || !B.myShot || !B.oppShot) return;
+  B.finished = true; clearTimers(B);
+  let opp = B.oppShot, corrected = false;
+  if (B.witness && !B.witness.noFace && !opp.fromWitness && Math.abs(B.witness.score - opp.score) > 1.5) { opp = { ...B.witness }; corrected = true; }
+  const my = B.myShot, meIsA = B.role === 'a';
+  const sa = meIsA ? my.score : opp.score, sb2 = meIsA ? opp.score : my.score;
+  const iWin = meIsA ? sa >= sb2 : sb2 > sa;
+  S.battle = null; lockNav(false);
+  S.lastRoom = B.room; try { B.pc?.close(); } catch (e) {}
+  const achBefore = achSet(S.profile), tierBefore = tierOf(S.profile.elo).idx;
+  renderResult(B, my, opp, iWin, corrected);
+  let res = null;
+  try { res = await Net.report(B, my.score, opp.score, { me: my.cats, opp: opp.cats }); } catch (e) { console.error(e); }
+  const fresh = await Net.getProfile(S.user.id).catch(() => null);
+  if (fresh) S.profile = fresh;
+  let before = B.meBefore, after = S.profile.elo, winFinal = iWin;
+  if (res) { before = (meIsA ? res.elo_a_before : res.elo_b_before) ?? before; after = (meIsA ? res.elo_a_after : res.elo_b_after) ?? after; winFinal = res.winner === S.user.id; }
+  applyElo(B, before, after, winFinal, iWin, !res);
+  updateMe(true);
+  const achAfter = achSet(S.profile);
+  ACH.filter(a => achAfter.has(a.id) && !achBefore.has(a.id)).forEach((a, i) => setTimeout(() => { toast('Ачивка: ' + a.n, 'hot', a.ic); SFX.ach(); confetti(60, .15, .9); }, 3200 + i * 900));
+  const tAfter = tierOf(S.profile.elo);
+  if (tAfter.idx > tierBefore) setTimeout(() => { const v = $('#verdict'); if (v) v.insertAdjacentHTML('beforeend', `<span class="tierup">Новый ранг: ${tAfter.name}</span>`); confetti(140, .5, .2); SFX.ach(); }, 2800);
+  setTimeout(() => { if (S.lastRoom === B.room) { S.lastRoom = null; B.room.leave(); } }, 8000);
+}
+
+function sideHTML(key, prof, shot, other, win) {
+  return `
+  <div class="side ${key}-side ${win ? 'win' : ''}" id="side-${key}">
+    <div class="shot"><canvas id="cv-${key}"></canvas>${shot.noFace ? '<span class="noface">Лицо не найдено</span>' : ''}<span class="stamp" id="stamp-${key}">MOGGED</span></div>
+    <div class="side-head">
+      <div class="who">${ava(prof)}<div><b>${esc(prof.display_name)}</b><small>${fac(prof.faculty).short} · ${prof.elo} ELO</small></div></div>
+      <b class="score" data-to="${shot.score}">0.00</b>
+    </div>
+    <ul class="cats">${CATS.map(c => { const v = shot.cats?.[c.k] || 0, o = other.cats?.[c.k] || 0; return `<li class="${v > o ? 'better' : ''}"><span>${c.n}</span><span class="bar"><i data-v="${v / 10}"></i></span><b>${v.toFixed(1)}</b></li>`; }).join('')}</ul>
+  </div>`;
+}
+function renderResult(B, my, opp, iWin, corrected) {
+  S.view = 'result'; setNavOn('arena');
+  $('#main').innerHTML = `
+  <section class="result view">
+    <div class="verdict ${iWin ? 'win' : 'lose'}" id="verdict">
+      <p class="eyebrow">${B.ranked ? 'Рейтинговый бой' : 'Тренировка'} · vs ${esc(B.opp.display_name)}</p>
+      <h1 class="verdict-title" id="vTitle">${iWin ? 'Победа' : 'Замогали'}</h1>
+      <p class="elo-line"><span class="now" id="eloNow">${B.meBefore}</span><b class="d" id="eloD">считаем ELO…</b></p>
+    </div>
+    <div class="duel" id="duel">
+      ${sideHTML('me', S.profile, my, opp, iWin)}
+      <div class="vs-col">VS</div>
+      ${sideHTML('opp', B.opp, opp, my, !iWin)}
+    </div>
+    ${corrected ? '<p class="flag center">Счёт соперника пересчитан по видеопотоку: присланный снимок не совпал с трансляцией</p>' : ''}
+    <div class="result-actions">
+      <button class="btn primary" id="againBtn"><i data-lucide="swords"></i>Ещё бой <span class="kbd">R</span></button>
+      <button class="btn" id="arenaBtn">В арену</button>
+    </div>
+  </section>`;
+  icons();
+  $('#againBtn').onclick = again;
+  $('#arenaBtn').onclick = () => go('arena');
+  let done = 0;
+  const both = () => { if (++done === 2) reveal(); };
+  drawShot($('#cv-me'), my.img, my.lm, both);
+  drawShot($('#cv-opp'), opp.img, opp.lm, both);
+  function reveal() {
+    $$('.cats .bar i').forEach((i, k) => setTimeout(() => { i.style.transform = `scaleX(${i.dataset.v})`; }, (k % 6) * 70));
+    $$('.side-head .score').forEach(s => countUp(s, 0, +s.dataset.to, 1100, 2));
+    setTimeout(() => {
+      const st = $('#stamp-' + (iWin ? 'opp' : 'me')); if (!st) return;
+      st.classList.add('in'); SFX.stamp();
+      setTimeout(() => {
+        $('#duel')?.classList.add('shake');
+        if (iWin) { SFX.win(); confetti(220, .5, .3); setTimeout(() => confetti(90, .2, .5), 250); setTimeout(() => confetti(90, .8, .5), 400); }
+        else SFX.lose();
+      }, 420);
+    }, 1300);
+  }
+}
+function applyElo(B, before, after, winFinal, localWin, pending) {
+  const el = $('#eloNow'), dl = $('#eloD'); if (!el) return;
+  if (!B.ranked) { el.textContent = after; dl.textContent = 'тренировка, без ELO'; dl.className = 'd'; }
+  else if (pending && before === after) { el.textContent = after; dl.textContent = 'ELO обновится после подтверждения'; dl.className = 'd'; }
+  else { const d = after - before; dl.textContent = (d >= 0 ? '+' : '') + d; dl.className = 'd ' + (d >= 0 ? 'up' : 'down'); countUp(el, before, after, 1600); }
+  if (winFinal !== localWin) {
+    const v = $('#verdict'), t = $('#vTitle');
+    v.className = 'verdict ' + (winFinal ? 'win' : 'lose'); t.textContent = winFinal ? 'Победа' : 'Замогали';
+  }
+}
+function again() { go('arena'); setTimeout(startSearch, 350); }
+
+/* =================== leaderboard =================== */
+let boardFac = 'all';
+async function viewBoard() {
+  $('#main').innerHTML = `
+  <section class="board view">
+    <div class="board-head">
+      <div><p class="eyebrow">Рейтинг</p><h1 class="h-page">Таблица ELO</h1></div>
+      <div class="seg" id="facSeg">
+        <button data-f="all" aria-pressed="${boardFac === 'all'}">Все</button>
+        ${FACULTIES.map(f => `<button data-f="${f.id}" title="${f.name}" aria-pressed="${boardFac === f.id}">${f.short}</button>`).join('')}
+      </div>
+    </div>
+    <div>
+      <div class="row-head"><span>#</span><span></span><span>Игрок</span><span class="fc">Факультет</span><span class="wl">W / L</span><span>ELO</span></div>
+      <ol class="rows" id="boardRows">${'<li class="skel"></li>'.repeat(6)}</ol>
+    </div>
+  </section>`;
+  $$('[data-f]').forEach(b => b.onclick = () => { boardFac = b.dataset.f; SFX.click(); viewBoard(); });
+  try {
+    const rows = await Net.leaderboard(boardFac);
+    const ol = $('#boardRows'); if (!ol || S.view !== 'board') return;
+    if (!rows.length) { ol.outerHTML = `<div class="empty-state"><b>Здесь пока никого</b><span>Первый бой на этом факультете, и ты сразу в топе.</span><button class="btn primary sm" onclick="document.querySelector('[data-go=arena]').click()">В арену</button></div>`; return; }
+    ol.innerHTML = rows.map((p, i) => `
+      <li class="row ${i < 3 ? 'top' : ''} ${p.id === S.user.id ? 'me' : ''}" style="--i:${i}">
+        <span class="rk">${i + 1}</span>${ava(p)}
+        <span class="nm"><b>${esc(p.display_name)}${p.streak >= 3 ? ' 🔥' : ''}</b><small>@${esc(p.username)}</small>${tagsHTML(p.tags, 3)}</span>
+        <span class="fc">${fac(p.faculty).short}</span>
+        <span class="wl mono">${p.wins} / ${p.losses}</span>
+        <span class="el">${p.elo}</span>
+      </li>`).join('');
+  } catch (e) { const ol = $('#boardRows'); if (ol) ol.innerHTML = `<li class="empty-state"><b>Не загрузилось</b><span>${esc(e.message)}</span></li>`; }
+}
+
+/* =================== history =================== */
+async function viewHistory() {
+  $('#main').innerHTML = `
+  <section class="board view">
+    <div class="board-head">
+      <div><p class="eyebrow">История</p><h1 class="h-page">Твои бои</h1></div>
+      <div class="summary" id="hSum"></div>
+    </div>
+    <ol class="rows" id="hRows">${'<li class="skel"></li>'.repeat(5)}</ol>
+  </section>`;
+  try {
+    const uid = S.user.id, rows = await Net.history(uid);
+    const ol = $('#hRows'); if (!ol || S.view !== 'history') return;
+    if (!rows.length) { ol.outerHTML = `<div class="empty-state"><b>Боёв пока нет</b><span>Включи камеру и жми «В бой». Соперник подбирается в пределах ±${CONFIG.ELO_RANGE} ELO.</span><button class="btn primary sm" onclick="document.querySelector('[data-go=arena]').click()">В арену</button></div>`; return; }
+    let w = 0;
+    ol.innerHTML = rows.map((m, i) => {
+      const meA = m.player_a === uid, o = meA ? m.b : m.a, win = m.winner === uid; if (win) w++;
+      const ms = +(meA ? m.score_a : m.score_b), os = +(meA ? m.score_b : m.score_a);
+      const d = m.ranked ? (meA ? m.elo_a_after - m.elo_a_before : m.elo_b_after - m.elo_b_before) : null;
+      return `<li class="row hrow" style="--i:${i}">
+        <span class="res ${win ? 'w' : 'l'}">${win ? 'WIN' : 'LOSS'}</span>${ava(o)}
+        <span class="nm"><b>vs ${esc(o?.display_name)}</b><small>${fac(o?.faculty).short}${m.ranked ? '' : ' · тренировка'}</small></span>
+        <span class="sc">${ms.toFixed(2)} : ${os.toFixed(2)}</span>
+        <span class="dl ${d == null ? '' : d >= 0 ? 'up' : 'down'}">${d == null ? '·' : (d >= 0 ? '+' : '') + d}</span>
+        <span class="ago">${timeAgo(m.judged_at)}</span>
+      </li>`;
+    }).join('');
+    $('#hSum').innerHTML = `<span><b>${w}</b> W</span><span><b>${rows.length - w}</b> L</span>`;
+  } catch (e) { const ol = $('#hRows'); if (ol) ol.innerHTML = `<li class="empty-state"><b>Не загрузилось</b><span>${esc(e.message)}</span></li>`; }
+}
+
+/* =================== profile =================== */
+function normTag(t) { return t.replace(/^#+/, '').trim().toLowerCase().replace(/\s+/g, '_').slice(0, 20); }
+async function cropAvatar(file) {
+  const url = URL.createObjectURL(file);
+  const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+  const s = Math.min(img.naturalWidth, img.naturalHeight), c = document.createElement('canvas');
+  c.width = c.height = 320;
+  c.getContext('2d').drawImage(img, (img.naturalWidth - s) / 2, (img.naturalHeight - s) / 2, s, s, 0, 0, 320, 320);
+  URL.revokeObjectURL(url);
+  return await new Promise(res => c.toBlob(res, 'image/jpeg', .85));
+}
+function viewProfile() {
+  const isNew = !S.profile;
+  const p = S.profile || { display_name: '', username: '', faculty: '', bio: '', tags: [], avatar_url: null, elo: 1000, peak_elo: 1000, wins: 0, losses: 0, streak: 0, best_streak: 0 };
+  const form = { ...p, tags: [...(p.tags || [])] };
+  const t = tierOf(p.elo), got = achSet(p), total = p.wins + p.losses;
+  $('#main').innerHTML = `
+  <section class="prof view">
+    <div class="prof-left">
+      <label class="ava-edit" id="avaEdit">
+        <span id="avaBox">${p.avatar_url ? `<img src="${esc(p.avatar_url)}" alt="">` : `<span class="ini">${esc(initials(p.display_name || '?'))}</span>`}</span>
+        <span class="over"><i data-lucide="image-up"></i>Сменить аву</span>
+        <input type="file" accept="image/*" id="avaInput" aria-label="Загрузить аватар">
+      </label>
+      <div class="prof-id">
+        <h2>${isNew ? 'Новый боец' : esc(p.display_name)}</h2>
+        <p>${isNew ? 'Заполни профиль, чтобы выйти на арену' : `@${esc(p.username)} · ${fac(p.faculty).name}`}</p>
+        <span class="tier-badge">${t.name}</span>
+      </div>
+      <dl class="statlist">
+        <div><dt>ELO</dt><dd>${p.elo}</dd></div><div><dt>Пик</dt><dd>${p.peak_elo}</dd></div>
+        <div><dt>Победы</dt><dd>${p.wins}</dd></div><div><dt>Поражения</dt><dd>${p.losses}</dd></div>
+        <div><dt>Винрейт</dt><dd>${total ? Math.round(p.wins / total * 100) : 0}%</dd></div><div><dt>Лучшая серия</dt><dd>${p.best_streak}</dd></div>
+      </dl>
+      <div class="ach-block">
+        <div class="ach-title"><span class="eyebrow">Ачивки</span><span class="mono muted" style="font-size:.8rem">${got.size}/${ACH.length}</span></div>
+        <ul class="ach" style="margin-top:12px">${ACH.map(a => `<li class="${got.has(a.id) ? 'got' : ''}"><span class="ic"><i data-lucide="${a.ic}"></i></span><span><b>${a.n}</b>${a.d}</span></li>`).join('')}</ul>
+      </div>
+    </div>
+    <form class="prof-form" id="profForm" novalidate>
+      <div><p class="eyebrow">${isNew ? 'Шаг 1 из 1' : 'Настройки'}</p><h1 class="h-page">${isNew ? 'Заверши профиль' : 'Профиль'}</h1></div>
+      <div class="row2">
+        <div class="field"><label for="pName">Имя</label><input class="input" id="pName" maxlength="32" value="${esc(form.display_name)}"></div>
+        <div class="field"><label for="pUser">Юзернейм</label><input class="input" id="pUser" maxlength="20" value="${esc(form.username)}"></div>
+      </div>
+      <div class="field"><label for="pFac">Факультет</label>
+        <select class="select" id="pFac"><option value="">Выбери факультет</option>${FACULTIES.map(f => `<option value="${f.id}" ${form.faculty === f.id ? 'selected' : ''}>${f.name}</option>`).join('')}</select>
+      </div>
+      <div class="field"><label for="pBio">О себе</label><textarea class="input" id="pBio" maxlength="160" placeholder="Пара слов, которые увидит соперник">${esc(form.bio)}</textarea><span class="counter" id="bioCnt">${(form.bio || '').length}/160</span></div>
+      <div class="field">
+        <span class="lbl">Теги · до 6</span>
+        <div class="tag-input" id="tagBox"></div>
+        <div class="sugg" id="tagSugg"></div>
+      </div>
+      <p class="err" id="profErr"></p>
+      <div class="form-actions">
+        <button class="btn primary" id="saveBtn">${isNew ? 'На арену' : 'Сохранить'}<i data-lucide="${isNew ? 'arrow-right' : 'check'}"></i></button>
+        <button class="btn ghost" type="button" id="outBtn"><i data-lucide="log-out"></i>Выйти</button>
+      </div>
+    </form>
+  </section>`;
+  icons();
+
+  const renderTags = () => {
+    $('#tagBox').innerHTML = form.tags.map((t, i) => `<span class="chip">#${esc(t)}<button type="button" data-rm="${i}" aria-label="Убрать"><i data-lucide="x"></i></button></span>`).join('') +
+      (form.tags.length < 6 ? `<input id="tagIn" placeholder="${form.tags.length ? 'ещё тег' : 'например gym, кодинг'}" maxlength="20">` : '');
+    $('#tagSugg').innerHTML = form.tags.length < 6 ? TAG_SUGGEST.filter(s => !form.tags.includes(s)).slice(0, 8).map(s => `<button type="button" data-add="${esc(s)}">+ ${esc(s)}</button>`).join('') : '';
+    icons();
+    const inp = $('#tagIn');
+    if (inp) inp.onkeydown = e => {
+      if ((e.key === 'Enter' || e.key === ',') && inp.value.trim()) { e.preventDefault(); addTag(inp.value); }
+      else if (e.key === 'Backspace' && !inp.value && form.tags.length) { form.tags.pop(); renderTags(); $('#tagIn')?.focus(); }
+    };
+  };
+  const addTag = v => { const t = normTag(v); if (t && !form.tags.includes(t) && form.tags.length < 6) { form.tags.push(t); SFX.click(); } renderTags(); $('#tagIn')?.focus(); };
+  $('#tagBox').onclick = e => { const b = e.target.closest('[data-rm]'); if (b) { form.tags.splice(+b.dataset.rm, 1); renderTags(); } else $('#tagIn')?.focus(); };
+  $('#tagSugg').onclick = e => { const b = e.target.closest('[data-add]'); if (b) addTag(b.dataset.add); };
+  renderTags();
+  $('#pBio').oninput = e => { $('#bioCnt').textContent = e.target.value.length + '/160'; };
+
+  $('#avaInput').onchange = async e => {
+    const f = e.target.files?.[0]; if (!f) return;
+    if (!f.type.startsWith('image/')) { toast('Нужна картинка', 'hot'); return; }
+    const box = $('#avaEdit'); box.classList.add('busy');
+    try {
+      const blob = await cropAvatar(f);
+      const url = await Net.uploadAvatar(S.user.id, blob);
+      form.avatar_url = url;
+      $('#avaBox').innerHTML = `<img src="${esc(url)}" alt="">`;
+      if (!isNew) { S.profile = await Net.saveProfile(S.user.id, { avatar_url: url }, false); updateMe(); toast('Ава обновлена', '', 'check'); }
+    } catch (ex) { toast('Не загрузилось: ' + ex.message, 'hot'); }
+    box.classList.remove('busy');
+  };
+  $('#outBtn').onclick = async () => { await Net.signOut(); location.reload(); };
+  $('#profForm').onsubmit = async e => {
+    e.preventDefault();
+    const err = $('#profErr'), btn = $('#saveBtn'); err.textContent = '';
+    $$('.input,.select').forEach(i => i.removeAttribute('aria-invalid'));
+    const pending = $('#tagIn')?.value.trim(); if (pending) addTag(pending);
+    const patch = {
+      display_name: $('#pName').value.trim(), username: $('#pUser').value.trim(), faculty: $('#pFac').value,
+      bio: $('#pBio').value.trim(), tags: form.tags, avatar_url: form.avatar_url || null,
+    };
+    const bad = (id, m) => { $(id).setAttribute('aria-invalid', 'true'); err.textContent = m; $(id).focus(); };
+    if (patch.display_name.length < 2) return bad('#pName', 'Имя: от 2 символов');
+    if (!/^[a-zA-Z0-9_.]{3,20}$/.test(patch.username)) return bad('#pUser', 'Юзернейм: 3-20 символов, латиница, цифры, _ и .');
+    if (!patch.faculty) return bad('#pFac', 'Выбери факультет');
+    btn.classList.add('is-loading');
+    try {
+      S.profile = await Net.saveProfile(S.user.id, patch, isNew);
+      updateMe(true); toast(isNew ? 'Профиль готов. Погнали' : 'Сохранено', '', 'check');
+      if (isNew) { lockNav(false); startLive(); confetti(120, .5, .3); SFX.win(); go('arena'); }
+      else { btn.classList.remove('is-loading'); viewProfile(); }
+    } catch (ex) { btn.classList.remove('is-loading'); err.textContent = ex.message; }
+  };
+}
+
+/* =================== boot =================== */
+function startLive() {
+  if (S.liveStarted) return; S.liveStarted = true;
+  Net.lobby(S.user.id, n => { S.online = n; updateOnline(); });
+  Net.onFeed(() => loadFeed());
+  loadFeed();
+  loadLandmarker().catch(() => {});
+}
+async function boot() {
+  const u = await Net.session().catch(() => null);
+  if (!u) { renderAuth(); return; }
+  S.user = u;
+  S.profile = await Net.getProfile(u.id).catch(e => { console.error(e); return null; });
+  renderShell();
+  if (!S.profile) { lockNav(true); S.view = 'profile'; viewProfile(); return; }
+  startLive();
+  go('arena');
+}
+
+document.addEventListener('keydown', e => {
+  if (e.target.closest?.('input,textarea,select')) return;
+  if (!S.profile || S.battle) return;
+  const map = { '1': 'arena', '2': 'board', '3': 'history', '4': 'profile' };
+  if (map[e.key]) { go(map[e.key]); return; }
+  if (S.view === 'arena') {
+    if ((e.key === 'Enter' || e.code === 'Space') && !S.search && !e.target.closest?.('button')) { e.preventDefault(); startSearch(); }
+    if (e.key === 'Escape' && S.search) cancelSearch();
+  }
+  if (S.view === 'result' && (e.key.toLowerCase() === 'r' || e.key.toLowerCase() === 'к')) again();
+});
+addEventListener('beforeunload', () => {
+  try { S.battle?.room?.send('bye', {}); S.battle?.room?.leave(); } catch (e) {}
+  if (S.search) S.search.ac.abort();
+});
+
+boot();
+</script>
 </body>
 </html>
